@@ -38,43 +38,50 @@ import (
 )
 
 const (
-	// GPUResourceName need to follow https://github.com/NVIDIA/k8s-device-plugin/blob/66a35b71ac4b5cbfb04714678b548bd77e5ba719/server.go#L20
+	// GPUResourceName GPU 资源名称。
+	// 这里需要遵循 NVIDIA k8s-device-plugin 中使用的资源名约定。
 	GPUResourceName = "nvidia.com/gpu"
 )
 
 const (
+	// minResource 最小资源阈值。
+	// 小于该值的资源通常可视为 0，也用作浮点比较时的误差容忍值。
 	minResource float64 = 0.1
 )
 
-// DimensionDefaultValue means default value for black resource dimension
+// DimensionDefaultValue 表示“某个资源维度未定义时”的默认值策略。
 type DimensionDefaultValue int
 
 const (
-	// Zero means resource dimension not defined will be treated as zero
+	// Zero 表示：未定义的资源维度按 0 处理。
 	Zero DimensionDefaultValue = 0
-	// Infinity means resource dimension not defined will be treated as infinity
+	// Infinity 表示：未定义的资源维度按无穷大处理。
+	// 这里内部用 -1 表示该语义。
 	Infinity DimensionDefaultValue = -1
 )
 
-// Resource struct defines all the resource type
+// Resource 结构体定义了所有资源类型。
 type Resource struct {
+	// MilliCPU 表示 CPU，单位为毫核（millicore）。
 	MilliCPU float64
-	Memory   float64
 
-	// ScalarResources
+	// Memory 表示内存，通常为字节数。
+	Memory float64
+
+	// ScalarResources 表示标量资源，如 GPU、pods、ephemeral-storage、hugepages 等。
 	ScalarResources map[v1.ResourceName]float64
 
-	// MaxTaskNum is only used by predicates; it should NOT
-	// be accounted in other operators, e.g. Add.
+	// MaxTaskNum 仅用于 predicates（谓词检查）；
+	// 不应在其他资源运算（如 Add）中作为普通资源处理。
 	MaxTaskNum int
 }
 
-// EmptyResource creates a empty resource object and returns
+// EmptyResource 创建并返回一个空资源对象。
 func EmptyResource() *Resource {
 	return &Resource{}
 }
 
-// InfiniteResource creates an infinite resource object and returns
+// InfiniteResource 创建并返回一个“无限资源”对象。
 func InfiniteResource() *Resource {
 	return &Resource{
 		MilliCPU:   math.MaxFloat64,
@@ -83,25 +90,30 @@ func InfiniteResource() *Resource {
 	}
 }
 
-// NewResource creates a new resource object from resource list
+// NewResource 根据 Kubernetes 的 ResourceList 创建一个新的 Resource 对象。
 func NewResource(rl v1.ResourceList) *Resource {
 	r := EmptyResource()
 	for rName, rQuant := range rl {
 		switch rName {
 		case v1.ResourceCPU:
+			// CPU 按毫核存储
 			r.MilliCPU += float64(rQuant.MilliValue())
 		case v1.ResourceMemory:
+			// Memory 按整数值（通常为字节）存储
 			r.Memory += float64(rQuant.Value())
 		case v1.ResourcePods:
+			// pods 资源既用于 MaxTaskNum，也存入 scalar 中
 			r.MaxTaskNum += int(rQuant.Value())
 			r.AddScalar(rName, float64(rQuant.Value()))
 		case v1.ResourceEphemeralStorage:
+			// 临时存储按 MilliValue 存储
 			r.AddScalar(rName, float64(rQuant.MilliValue()))
 		default:
+			// count/xxx 这类 quota 跳过
 			if IsCountQuota(rName) {
 				continue
 			}
-			//NOTE: When converting this back to k8s resource, we need record the format as well as / 1000
+			// 注意：当转换回 k8s resource 时，除了 /1000 之外，还需要保留格式。
 			if v1helper.IsScalarResourceName(rName) {
 				ignore := false
 				IgnoredDevicesList.Range(func(_ int, val string) bool {
@@ -122,33 +134,37 @@ func NewResource(rl v1.ResourceList) *Resource {
 	return r
 }
 
-// ResFloat642Quantity transform resource quantity
+// ResFloat642Quantity 将 float64 类型资源值转换为 k8s 的 resource.Quantity。
 func ResFloat642Quantity(resName v1.ResourceName, quantity float64) resource.Quantity {
 	var resQuantity *resource.Quantity
 	switch resName {
 	case v1.ResourceCPU:
+		// CPU 使用毫核格式
 		resQuantity = resource.NewMilliQuantity(int64(quantity), resource.DecimalSI)
 	default:
+		// 其他资源使用普通数量格式
 		resQuantity = resource.NewQuantity(int64(quantity), resource.BinarySI)
 	}
 
 	return *resQuantity
 }
 
-// ResQuantity2Float64 transform resource quantity
+// ResQuantity2Float64 将 k8s 的 resource.Quantity 转换为 float64。
 func ResQuantity2Float64(resName v1.ResourceName, quantity resource.Quantity) float64 {
 	var resQuantity float64
 	switch resName {
 	case v1.ResourceCPU:
+		// CPU 取 MilliValue
 		resQuantity = float64(quantity.MilliValue())
 	default:
+		// 其他资源取 Value
 		resQuantity = float64(quantity.Value())
 	}
 
 	return resQuantity
 }
 
-// Clone is used to clone a resource type, which is a deep copy function.
+// Clone 深拷贝当前 Resource 对象。
 func (r *Resource) Clone() *Resource {
 	clone := &Resource{
 		MilliCPU:   r.MilliCPU,
@@ -166,22 +182,24 @@ func (r *Resource) Clone() *Resource {
 	return clone
 }
 
-// String returns resource details in string format
+// String 返回资源详情的字符串表示。
 func (r *Resource) String() string {
 	str := fmt.Sprintf("cpu %0.2f, memory %0.2f", r.MilliCPU, r.Memory)
-	// Sort scalar resource names to ensure consistent string output
+
+	// 对 scalar 资源名排序，保证字符串输出稳定一致
 	var resourceNames []string
 	for rName := range r.ScalarResources {
 		resourceNames = append(resourceNames, string(rName))
 	}
 	sort.Strings(resourceNames)
+
 	for _, rName := range resourceNames {
 		str = fmt.Sprintf("%s, %s %0.2f", str, rName, r.ScalarResources[v1.ResourceName(rName)])
 	}
 	return str
 }
 
-// ResourceNames returns all resource types
+// ResourceNames 返回所有非零资源类型名称。
 func (r *Resource) ResourceNames() ResourceNameList {
 	resNames := ResourceNameList{}
 
@@ -202,7 +220,7 @@ func (r *Resource) ResourceNames() ResourceNameList {
 	return resNames
 }
 
-// Get returns the resource value for that particular resource type
+// Get 根据资源名称返回对应资源值。
 func (r *Resource) Get(rn v1.ResourceName) float64 {
 	switch rn {
 	case v1.ResourceCPU:
@@ -217,15 +235,16 @@ func (r *Resource) Get(rn v1.ResourceName) float64 {
 	}
 }
 
-// Skip checking "pods" resource.
-// All pods request one "pods" resource now, no need to check it
+// 忽略检查 "pods" 资源。
+// 目前所有 pod 都会请求一个 "pods" 资源，因此通常没必要额外检查它。
 var ignoredScalarResources = sets.NewString(string(v1.ResourcePods))
 
+// IsIgnoredScalarResource 判断一个 scalar 资源是否应被忽略。
 func IsIgnoredScalarResource(name v1.ResourceName) bool {
 	return ignoredScalarResources.Has(string(name))
 }
 
-// FilteredIgnoredScalarResources returns a new ResourceNameList excluding any resource names present in ignoredScalarResources.
+// FilteredIgnoredScalarResources 返回一个新的 ResourceNameList，去掉所有被忽略的资源。
 func (r ResourceNameList) FilteredIgnoredScalarResources() ResourceNameList {
 	filtered := ResourceNameList{}
 	for _, name := range r {
@@ -236,7 +255,8 @@ func (r ResourceNameList) FilteredIgnoredScalarResources() ResourceNameList {
 	return filtered
 }
 
-// IsEmpty returns false if any kind of resource other than IgnoredResources is not less than min value, otherwise returns true
+// IsEmpty 判断资源对象是否为空。
+// 如果任意一种非忽略资源不小于最小阈值，则返回 false，否则返回 true。
 func (r *Resource) IsEmpty() bool {
 	if !(r.MilliCPU < minResource && r.Memory < minResource) {
 		return false
@@ -254,7 +274,7 @@ func (r *Resource) IsEmpty() bool {
 	return true
 }
 
-// IsZero returns false if the given kind of resource is not less than min value
+// IsZero 判断指定资源维度是否为 0（小于 minResource 即视为 0）。
 func (r *Resource) IsZero(rn v1.ResourceName) bool {
 	switch rn {
 	case v1.ResourceCPU:
@@ -273,7 +293,7 @@ func (r *Resource) IsZero(rn v1.ResourceName) bool {
 	}
 }
 
-// Add is used to add two given resources
+// Add 将 rr 加到当前资源对象 r 上。
 func (r *Resource) Add(rr *Resource) *Resource {
 	r.MilliCPU += rr.MilliCPU
 	r.Memory += rr.Memory
@@ -288,14 +308,15 @@ func (r *Resource) Add(rr *Resource) *Resource {
 	return r
 }
 
-// Sub subtracts two Resource objects with assertion.
+// Sub 从当前资源对象 r 中减去 rr，并进行断言检查。
+// 若资源不足，会触发断言失败。
 func (r *Resource) Sub(rr *Resource) *Resource {
 	assert.Assertf(rr.LessEqual(r, Zero), "resource is not sufficient to do operation: <%v> sub <%v>", r, rr)
 	return r.sub(rr)
 }
 
-// SubWithoutAssert subtracts two Resource objects without assertion,
-// this function is added because some resource subtraction allows negative results, while others do not.
+// SubWithoutAssert 从当前资源对象 r 中减去 rr，但不做断言。
+// 如果资源不足允许出现负数，只会打印错误日志。
 func (r *Resource) SubWithoutAssert(rr *Resource) *Resource {
 	ok, resources := rr.LessEqualWithResourcesName(r, Zero)
 	if !ok {
@@ -304,7 +325,7 @@ func (r *Resource) SubWithoutAssert(rr *Resource) *Resource {
 	return r.sub(rr)
 }
 
-// sub subtracts two Resource objects.
+// sub 真正执行资源相减的内部函数。
 func (r *Resource) sub(rr *Resource) *Resource {
 	r.MilliCPU -= rr.MilliCPU
 	r.Memory -= rr.Memory
@@ -319,7 +340,7 @@ func (r *Resource) sub(rr *Resource) *Resource {
 	return r
 }
 
-// Multi multiples the resource with ratio provided
+// Multi 将资源对象按给定比例进行缩放。
 func (r *Resource) Multi(ratio float64) *Resource {
 	r.MilliCPU *= ratio
 	r.Memory *= ratio
@@ -329,7 +350,7 @@ func (r *Resource) Multi(ratio float64) *Resource {
 	return r
 }
 
-// SetMaxResource compares with ResourceList and takes max value for each Resource.
+// SetMaxResource 与 rr 逐维比较，并将当前资源设置为每一维的最大值。
 func (r *Resource) SetMaxResource(rr *Resource) {
 	if r == nil || rr == nil {
 		return
@@ -357,10 +378,9 @@ func (r *Resource) SetMaxResource(rr *Resource) {
 	}
 }
 
-// FitDelta Computes the delta between a resource object representing available
-// resources an operand representing resources being requested.  Any
-// field that is less than 0 after the operation represents an
-// insufficient resource.
+// FitDelta 计算资源剩余差值。
+// 当前对象 r 一般表示“可用资源”，rr 表示“请求资源”。
+// 若某一维结果小于 0，则表示该维资源不足。
 func (r *Resource) FitDelta(rr *Resource) *Resource {
 	if rr.MilliCPU > 0 {
 		r.MilliCPU -= rr.MilliCPU + minResource
@@ -387,9 +407,9 @@ func (r *Resource) FitDelta(rr *Resource) *Resource {
 	return r
 }
 
-// Less returns true only on condition that all dimensions of resources in r are less than that of rr,
-// Otherwise returns false.
-// @param defaultValue "default value for resource dimension not defined in ScalarResources. Its value can only be one of 'Zero' and 'Infinity'"
+// Less 判断 r 是否在所有维度上都严格小于 rr。
+// 否则返回 false。
+// defaultValue 用于处理 ScalarResources 中未定义维度的默认值，取值只能是 Zero 或 Infinity。
 func (r *Resource) Less(rr *Resource, defaultValue DimensionDefaultValue) bool {
 	lessFunc := func(l, r float64) bool {
 		return l < r
@@ -423,9 +443,9 @@ func (r *Resource) Less(rr *Resource, defaultValue DimensionDefaultValue) bool {
 	return true
 }
 
-// LessEqual returns true only on condition that all dimensions of resources in r are less than or equal with that of rr,
-// Otherwise returns false.
-// @param defaultValue "default value for resource dimension not defined in ScalarResources. Its value can only be one of 'Zero' and 'Infinity'"
+// LessEqual 判断 r 是否在所有维度上都小于等于 rr。
+// 否则返回 false。
+// defaultValue 用于处理 ScalarResources 中未定义维度的默认值，取值只能是 Zero 或 Infinity。
 func (r *Resource) LessEqual(rr *Resource, defaultValue DimensionDefaultValue) bool {
 	lessEqualFunc := func(l, r, diff float64) bool {
 		if l < r || math.Abs(l-r) < diff {
@@ -462,10 +482,9 @@ func (r *Resource) LessEqual(rr *Resource, defaultValue DimensionDefaultValue) b
 	return true
 }
 
-// LessEqualWithDimensionAndResourcesName only compare the resource items in req param
-// Will return false and a slice of resource names showing the ones that are insufficient
-// @param req define the resource item to be compared
-// if req is nil, equals r.LessEqualWithResourcesName(rr, Zero)
+// LessEqualWithDimensionAndResourcesName 只比较 req 中指定的资源维度。
+// 返回 false 时，还会附带返回不足的资源名称列表。
+// 如果 req 为 nil，则等价于 r.LessEqualWithResourcesName(rr, Zero)。
 func (r *Resource) LessEqualWithDimensionAndResourcesName(rr *Resource, req *Resource) (bool, []string) {
 	resources := []string{}
 	if r == nil {
@@ -488,7 +507,7 @@ func (r *Resource) LessEqualWithDimensionAndResourcesName(rr *Resource, req *Res
 		resources = append(resources, "memory")
 	}
 
-	// if r.scalar is nil, whatever rr.scalar is, r is less or equal to rr
+	// 如果 r.scalar 为 nil，则无论 rr.scalar 如何，r 都可以视作 <= rr
 	if r.ScalarResources == nil {
 		if len(resources) > 0 {
 			return false, resources
@@ -513,10 +532,10 @@ func (r *Resource) LessEqualWithDimensionAndResourcesName(rr *Resource, req *Res
 	return true, resources
 }
 
-// LessEqualWithResourcesName returns true, []string{} only on condition that all dimensions of resources in r are less than or equal with that of rr,
-// Otherwise returns false and a slice of string, which shows what resources are insufficient.
-// @param defaultValue "default value for resource dimension not defined in ScalarResources. Its value can only be one of 'Zero' and 'Infinity'"
-// this function is the same as LessEqual, and it will be merged to LessEqual in the future
+// LessEqualWithResourcesName 判断 r 是否在所有维度上都小于等于 rr。
+// 若不满足，返回 false 以及不足的资源名称列表。
+// defaultValue 用于处理未定义 scalar 维度的默认值。
+// 该函数与 LessEqual 逻辑相同，只是多返回资源名称列表，未来可能会与 LessEqual 合并。
 func (r *Resource) LessEqualWithResourcesName(rr *Resource, defaultValue DimensionDefaultValue) (bool, []string) {
 	resources := []string{}
 	lessEqualFunc := func(l, r, diff float64) bool {
@@ -549,9 +568,9 @@ func (r *Resource) LessEqualWithResourcesName(rr *Resource, defaultValue Dimensi
 	return true, resources
 }
 
-// LessPartly returns true if there exists any dimension whose resource amount in r is less than that in rr.
-// Otherwise returns false.
-// @param defaultValue "default value for resource dimension not defined in ScalarResources. Its value can only be one of 'Zero' and 'Infinity'"
+// LessPartly 判断是否存在任意一个维度，使得 r 在该维度上小于 rr。
+// 只要存在一个维度满足条件，就返回 true；否则返回 false。
+// defaultValue 用于处理未定义 scalar 维度的默认值。
 func (r *Resource) LessPartly(rr *Resource, defaultValue DimensionDefaultValue) bool {
 	lessFunc := func(l, r float64) bool {
 		return l < r
@@ -582,9 +601,9 @@ func (r *Resource) LessPartly(rr *Resource, defaultValue DimensionDefaultValue) 
 	return false
 }
 
-// LessEqualPartly returns true if there exists any dimension whose resource amount in r is less than or equal with that in rr.
-// Otherwise returns false.
-// @param defaultValue "default value for resource dimension not defined in ScalarResources. Its value can only be one of 'Zero' and 'Infinity'"
+// LessEqualPartly 判断是否存在任意一个维度，使得 r 在该维度上小于等于 rr。
+// 只要存在一个维度满足条件，就返回 true；否则返回 false。
+// defaultValue 用于处理未定义 scalar 维度的默认值。
 func (r *Resource) LessEqualPartly(rr *Resource, defaultValue DimensionDefaultValue) bool {
 	lessEqualFunc := func(l, r, diff float64) bool {
 		if l < r || math.Abs(l-r) < diff {
@@ -618,11 +637,11 @@ func (r *Resource) LessEqualPartly(rr *Resource, defaultValue DimensionDefaultVa
 	return false
 }
 
-// LessEqualPartlyWithDimension returns true if there exists any dimension
-// whose resource amount in r is less than or equal with that in rr along the requested dimensions in req.
-// Will return true and a slice of resource names that are sufficient
-// @param req define the resource item with the dimensions to be compared
-// if req is nil then return is false and an empty slice
+// LessEqualPartlyWithDimension 在 req 指定的维度中，判断是否存在任意一个维度使得 r <= rr。
+// 返回值为：
+// 1. 是否存在满足条件的维度
+// 2. 满足条件的资源名称列表
+// 如果 req 为 nil，则返回 false 和空列表。
 func (r *Resource) LessEqualPartlyWithDimension(rr *Resource, req *Resource) (bool, []string) {
 	lessEqualFunc := func(l, r, diff float64) bool {
 		return l < r || math.Abs(l-r) < diff
@@ -661,13 +680,14 @@ func (r *Resource) LessEqualPartlyWithDimension(rr *Resource, req *Resource) (bo
 	return found, resources
 }
 
-// LessEqualPartlyWithDimensionZeroFiltered filters out dimensions present in req that are both zero (or nil) in r and rr,
-// then calls LessEqualPartlyWithDimension to compare only the relevant dimensions.
-// This is needed for preemption cases, where we want to ignore dimensions that are not being used by either the current resource
-// or the compared resource but are present in the requested resource.
-// Returns true and a slice of resource names that are sufficient along the filtered dimensions.
-// @param req define the resource item with the dimensions to be compared
-// If req is nil, returns false and an empty slice.
+// LessEqualPartlyWithDimensionZeroFiltered 会先过滤 req 中那些在 r 和 rr 中都为 0（或 nil）的维度，
+// 然后再调用 LessEqualPartlyWithDimension 进行比较。
+// 这在抢占场景中很有用：
+// 如果某个维度虽然存在于 req 中，但当前资源和比较对象都没有使用该维度，则无需比较它。
+// 返回值为：
+// 1. 是否存在满足 r <= rr 的维度
+// 2. 满足条件的资源名称列表
+// 如果 req 为 nil，则返回 false 和空列表。
 func (r *Resource) LessEqualPartlyWithDimensionZeroFiltered(rr *Resource, req *Resource) (bool, []string) {
 	if req == nil {
 		return false, []string{}
@@ -697,9 +717,8 @@ func (r *Resource) LessEqualPartlyWithDimensionZeroFiltered(rr *Resource, req *R
 	return r.LessEqualPartlyWithDimension(rr, filteredReq)
 }
 
-// Equal returns true only on condition that values in all dimension are equal with each other for r and rr
-// Otherwise returns false.
-// @param defaultValue "default value for resource dimension not defined in ScalarResources. Its value can only be one of 'Zero' and 'Infinity'"
+// Equal 判断 r 与 rr 是否在所有维度上都相等（允许 minResource 范围内误差）。
+// defaultValue 用于处理未定义 scalar 维度的默认值。
 func (r *Resource) Equal(rr *Resource, defaultValue DimensionDefaultValue) bool {
 	equalFunc := func(l, r, diff float64) bool {
 		return l == r || math.Abs(l-r) < diff
@@ -718,52 +737,27 @@ func (r *Resource) Equal(rr *Resource, defaultValue DimensionDefaultValue) bool 
 	return true
 }
 
-// GreaterPartly returns true if there exists any dimension whose resource amount in r is greater than that in rr.
-// Otherwise returns false.
-// @param defaultValue "default value for resource dimension not defined in ScalarResources. Its value can only be one of 'Zero' and 'Infinity'"
-// @returns true and a slice of resource names that are exceeding else false and an empty slice.
+// GreaterPartly 判断是否存在任意一个维度，使得 r 在该维度上大于 rr。
+// 返回：
+// 1. 是否存在超出的维度
+// 2. 超出的资源名称列表
 func (r *Resource) GreaterPartly(rr *Resource, defaultValue DimensionDefaultValue) (bool, []string) {
 	ok, resources := r.LessEqualWithResourcesName(rr, defaultValue)
 	return !ok, resources
 }
 
-// GreaterPartlyWithDimension returns true if there exists any dimension
-// whose resource amount in r is greater than that in rr along the requested dimensions in req.
-// Will return true and a slice of resource names that are exceeding
+// GreaterPartlyWithDimension 在 req 指定的维度中，判断是否存在任意一个维度使得 r > rr。
+// 返回：
+// 1. 是否存在超出的维度
+// 2. 超出的资源名称列表
 //
-// The main difference between GreaterPartlyWithDimension and GreaterPartlyWithRelevantDimensions is that the latter
-// will filter out standard dimensions (MilliCPU, Memory) where rr is zero or less than minResource and
-// only considers scalar dimensions greater than 0 in req and present in rr.
+// 该函数与 GreaterPartlyWithRelevantDimensions 的主要区别是：
+// 后者会过滤掉 rr 中值为 0 或未定义的“无关维度”；
+// 而本函数只要 req 指定了某维度，就会直接比较。
 //
-// For example:
-//
-//	r: <gpu 2> rr: <> req: <gpu 1>
-//	  r.GreaterPartlyWithDimension(rr, req) => (true, [gpu])
-//	  r.GreaterPartlyWithRelevantDimensions(rr, req) => (false, []) since rr does not have gpu resource
-//	r: <cpu 4> rr: <cpu 0> req: <cpu 2>
-//	  r.GreaterPartlyWithDimension(rr, req) => (true, [cpu])
-//	  r.GreaterPartlyWithRelevantDimensions(rr, req) => (false, []) since rr has zero cpu resource
-//
-// But these cases are the same:
-//
-//	r: <gpu 2> rr: <gpu 0> req: <gpu 1>
-//	  r.GreaterPartlyWithDimension(rr, req) => (true, [gpu])
-//	  r.GreaterPartlyWithRelevantDimensions(rr, req) => (true, [gpu]) since rr has gpu resource defined (even if zero)
-//	r: <cpu 4> rr: <cpu 0.1> req: <cpu 2>
-//	  r.GreaterPartlyWithDimension(rr, req) => (true, [cpu])
-//	  r.GreaterPartlyWithRelevantDimensions(rr, req) => (true, [cpu]) since rr has cpu resource greater than minResource
-//	r: <cpu 4, memory 8192, gpu 2> rr: <cpu 2, memory 8192, gpu 1>
-//	  req: <cpu 0, memory 0, gpu 1> => return (true, [gpu])
-//	  req: <cpu 2, memory 0, gpu 1> => return (true, [cpu, gpu])
-//	  req: <cpu 0, memory 4096, gpu 0> => return (false, [])
-//
-// The functions are not interchangeable and should be used based on specific comparison needs.
-// As a remark they don't differ in the handling of r and req, only in the handling of rr.
-//
-// @param rr is the Resource to compare against. If nil, treated as EmptyResource().
-// @param req is the Resource item with the dimensions to be compared on.
-// @returns true and a slice of resource names that are exceeding else false and an empty slice.
-// If req is nil then return is false and an empty slice.
+// @param rr 用于比较的目标 Resource；如果 rr 为 nil，则视为 EmptyResource()。
+// @param req 需要比较的资源维度集合。
+// 如果 req 为 nil，则返回 false 和空列表。
 func (r *Resource) GreaterPartlyWithDimension(rr *Resource, req *Resource) (bool, []string) {
 	greaterFunc := func(l, r float64) bool {
 		return l > r
@@ -802,45 +796,17 @@ func (r *Resource) GreaterPartlyWithDimension(rr *Resource, req *Resource) (bool
 	return len(resources) > 0, resources
 }
 
-// GreaterPartlyWithRelevantDimensions compares resource dimensions in req between r and rr,
-// but ignores any standard dimensions (MilliCPU, Memory) where rr is zero or less than minResource.
-// For scalar resources, only dimensions present in both req and rr are considered.
-// This is useful for reclaim scenarios, where you want to check if r exceeds rr
-// only in dimensions that rr actually possesses (i.e., "infinity-type" comparison).
+// GreaterPartlyWithRelevantDimensions 在 req 指定的维度中比较 r 和 rr，
+// 但会忽略 rr 中“不相关”的维度：
+// 1. 对 CPU/Memory，如果 rr 对应维度为 0 或小于 minResource，则忽略
+// 2. 对 scalar 资源，只有该维度同时存在于 req 和 rr 中时才比较
 //
-// The main difference between GreaterPartlyWithDimension and GreaterPartlyWithRelevantDimensions is that the latter
-// will filter out standard dimensions (MilliCPU, Memory) where rr is zero or less than minResource and
-// only considers scalar dimensions greater than 0 in req and present in rr.
+// 这在 reclaim（资源回收）场景中非常有用：
+// 只检查 r 是否在 rr 实际拥有的资源维度上超量，而不是对所有 req 维度盲目比较。
 //
-// For example:
-//
-//	r: <gpu 2> rr: <> req: <gpu 1>
-//	  r.GreaterPartlyWithDimension(rr, req) => (true, [gpu])
-//	  r.GreaterPartlyWithRelevantDimensions(rr, req) => (false, []) since rr does not have gpu resource
-//	r: <cpu 4> rr: <cpu 0> req: <cpu 2>
-//	  r.GreaterPartlyWithDimension(rr, req) => (true, [cpu])
-//	  r.GreaterPartlyWithRelevantDimensions(rr, req) => (false, []) since rr has zero cpu resource
-//
-// But these cases are the same:
-//
-//	r: <gpu 2> rr: <gpu 0> req: <gpu 1>
-//	  r.GreaterPartlyWithDimension(rr, req) => (true, [gpu])
-//	  r.GreaterPartlyWithRelevantDimensions(rr, req) => (true, [gpu]) since rr has gpu resource defined (even if zero)
-//	r: <cpu 4> rr: <cpu 0.1> req: <cpu 2>
-//	  r.GreaterPartlyWithDimension(rr, req) => (true, [cpu])
-//	  r.GreaterPartlyWithRelevantDimensions(rr, req) => (true, [cpu]) since rr has cpu resource greater than minResource
-//	r: <cpu 4, memory 8192, gpu 2> rr: <cpu 2, memory 8192, gpu 1>
-//	  req: <cpu 0, memory 0, gpu 1> => return (true, [gpu])
-//	  req: <cpu 2, memory 0, gpu 1> => return (true, [cpu, gpu])
-//	  req: <cpu 0, memory 4096, gpu 0> => return (false, [])
-//
-// The functions are not interchangeable and should be used based on specific comparison needs.
-// As a remark they don't differ in the handling of r and req, only in the handling of rr.
-//
-// @param rr is the Resource to compare against. If nil, treated as EmptyResource().
-// @param req is the Resource item with the dimensions to be compared on.
-// @returns true and a slice of resource names that are exceeding else false and an empty slice.
-// If req is nil then return is false and an empty slice.
+// @param rr 用于比较的目标 Resource；如果 rr 为 nil，则视为 EmptyResource()。
+// @param req 需要比较的资源维度集合。
+// 如果 req 为 nil，则返回 false 和空列表。
 func (r *Resource) GreaterPartlyWithRelevantDimensions(rr *Resource, req *Resource) (bool, []string) {
 	if req == nil {
 		return false, []string{}
@@ -850,17 +816,17 @@ func (r *Resource) GreaterPartlyWithRelevantDimensions(rr *Resource, req *Resour
 	}
 	filteredReq := &Resource{}
 
-	// CPU
+	// CPU：仅当 rr 的 CPU 有定义且大于 minResource 时才参与比较
 	if req.MilliCPU > 0 && !(rr.MilliCPU < minResource) {
 		filteredReq.MilliCPU = req.MilliCPU
 	}
 
-	// Memory
+	// Memory：仅当 rr 的 Memory 有定义且大于 minResource 时才参与比较
 	if req.Memory > 0 && !(rr.Memory < minResource) {
 		filteredReq.Memory = req.Memory
 	}
 
-	// Scalar resources
+	// Scalar resources：只保留 req 中定义且 rr 也存在的维度
 	if req.ScalarResources != nil {
 		filteredReq.ScalarResources = make(map[v1.ResourceName]float64)
 		for name, quant := range req.ScalarResources {
@@ -874,13 +840,19 @@ func (r *Resource) GreaterPartlyWithRelevantDimensions(rr *Resource, req *Resour
 	return r.GreaterPartlyWithDimension(rr, filteredReq)
 }
 
-// Diff calculate the difference between two resource object
-// Note: if `defaultValue` equals `Infinity`, the difference between two values will be `Infinity`, marked as -1
+// Diff 计算两个资源对象的差异。
+// 返回两个 Resource：
+// 1. increasedVal：左边 r 比右边 rr 多出来的部分
+// 2. decreasedVal：右边 rr 比左边 r 多出来的部分
+//
+// 注意：如果 defaultValue 为 Infinity，则未定义维度的差值可能被视为 Infinity（内部用 -1 标记）。
 func (r *Resource) Diff(rr *Resource, defaultValue DimensionDefaultValue) (*Resource, *Resource) {
 	leftRes := r.Clone()
 	rightRes := rr.Clone()
 	increasedVal := EmptyResource()
 	decreasedVal := EmptyResource()
+
+	// 先把双方缺失的 scalar 维度按 defaultValue 补齐
 	r.setDefaultValue(leftRes, rightRes, defaultValue)
 
 	if leftRes.MilliCPU > rightRes.MilliCPU {
@@ -917,25 +889,29 @@ func (r *Resource) Diff(rr *Resource, defaultValue DimensionDefaultValue) (*Reso
 	return increasedVal, decreasedVal
 }
 
-// AddScalar adds a resource by a scalar value of this resource.
+// AddScalar 给某个 scalar 资源增加数量。
 func (r *Resource) AddScalar(name v1.ResourceName, quantity float64) {
 	r.SetScalar(name, r.ScalarResources[name]+quantity)
 }
 
-// SetScalar sets a resource by a scalar value of this resource.
+// SetScalar 直接设置某个 scalar 资源的值。
 func (r *Resource) SetScalar(name v1.ResourceName, quantity float64) {
-	// Lazily allocate scalar resource map.
+	// 延迟初始化 scalar 资源 map
 	if r.ScalarResources == nil {
 		r.ScalarResources = map[v1.ResourceName]float64{}
 	}
 	r.ScalarResources[name] = quantity
 }
 
-// MinDimensionResource is used to reset the r resource dimension which is less than rr
-// e.g r resource is <cpu 2000.00, memory 4047845376.00, hugepages-2Mi 0.00, hugepages-1Gi 0.00>
-// rr resource is <cpu 3000.00, memory 1000.00>
-// return r resource is <cpu 2000.00, memory 1000.00, hugepages-2Mi 0.00, hugepages-1Gi 0.00>
-// @param defaultValue "default value for resource dimension not defined in ScalarResources. Its value can only be one of 'Zero' and 'Infinity'"
+// MinDimensionResource 用 rr 逐维更新 r，使 r 的每个维度都取较小值。
+// 例：
+// r  = <cpu 2000, memory 4047845376, hugepages-2Mi 0, hugepages-1Gi 0>
+// rr = <cpu 3000, memory 1000>
+// 返回后 r = <cpu 2000, memory 1000, hugepages-2Mi 0, hugepages-1Gi 0>
+//
+// defaultValue 用于处理 rr 中缺失 scalar 维度时的默认策略：
+// - Infinity：缺失维度不处理
+// - Zero：缺失维度置 0
 func (r *Resource) MinDimensionResource(rr *Resource, defaultValue DimensionDefaultValue) *Resource {
 	if rr.MilliCPU < r.MilliCPU {
 		r.MilliCPU = rr.MilliCPU
@@ -974,8 +950,8 @@ func (r *Resource) MinDimensionResource(rr *Resource, defaultValue DimensionDefa
 	return r
 }
 
-// setDefaultValue sets default value for resource dimension not defined of ScalarResource in leftResource and rightResource
-// @param defaultValue "default value for resource dimension not defined in ScalarResources. It can only be one of 'Zero' or 'Infinity'"
+// setDefaultValue 为左右两个 Resource 中未定义的 scalar 维度设置默认值。
+// defaultValue 只能是 Zero 或 Infinity。
 func (r *Resource) setDefaultValue(leftResource, rightResource *Resource, defaultValue DimensionDefaultValue) {
 	if leftResource.ScalarResources == nil {
 		leftResource.ScalarResources = map[v1.ResourceName]float64{}
@@ -983,6 +959,8 @@ func (r *Resource) setDefaultValue(leftResource, rightResource *Resource, defaul
 	if rightResource.ScalarResources == nil {
 		rightResource.ScalarResources = map[v1.ResourceName]float64{}
 	}
+
+	// 补齐 rightResource 中缺失的维度
 	for resourceName := range leftResource.ScalarResources {
 		_, ok := rightResource.ScalarResources[resourceName]
 		if !ok {
@@ -990,6 +968,7 @@ func (r *Resource) setDefaultValue(leftResource, rightResource *Resource, defaul
 		}
 	}
 
+	// 补齐 leftResource 中缺失的维度
 	for resourceName := range rightResource.ScalarResources {
 		_, ok := leftResource.ScalarResources[resourceName]
 		if !ok {
@@ -998,16 +977,17 @@ func (r *Resource) setDefaultValue(leftResource, rightResource *Resource, defaul
 	}
 }
 
-// ParseResourceList parses the given configuration map into an API
-// ResourceList or returns an error.
+// ParseResourceList 将给定配置 map 解析为 Kubernetes 的 ResourceList。
+// 若解析失败则返回错误。
 func ParseResourceList(m map[string]string) (v1.ResourceList, error) {
 	if len(m) == 0 {
 		return nil, nil
 	}
+
 	rl := make(v1.ResourceList)
 	for k, v := range m {
 		switch v1.ResourceName(k) {
-		// CPU, memory, local storage, and PID resources are supported.
+		// 当前仅支持 CPU、memory、ephemeral-storage
 		case v1.ResourceCPU, v1.ResourceMemory, v1.ResourceEphemeralStorage:
 			q, err := resource.ParseQuantity(v)
 			if err != nil {
@@ -1024,14 +1004,15 @@ func ParseResourceList(m map[string]string) (v1.ResourceList, error) {
 	return rl, nil
 }
 
+// GetMinResource 返回最小资源阈值。
 func GetMinResource() float64 {
 	return minResource
 }
 
-// ResourceNameList struct defines resource name collection
+// ResourceNameList 定义资源名称列表类型。
 type ResourceNameList []v1.ResourceName
 
-// Contains judges whether rr is subset of r
+// Contains 判断 rr 是否是 r 的子集（即 rr 中每个资源名都存在于 r 中）。
 func (r ResourceNameList) Contains(rr ResourceNameList) bool {
 	for _, rrName := range ([]v1.ResourceName)(rr) {
 		isResourceExist := slices.Contains(([]v1.ResourceName)(r), rrName)
@@ -1042,36 +1023,38 @@ func (r ResourceNameList) Contains(rr ResourceNameList) bool {
 	return true
 }
 
+// IsCountQuota 判断资源名是否为 count/ 前缀的 quota 资源。
 func IsCountQuota(name v1.ResourceName) bool {
 	return strings.HasPrefix(string(name), "count/")
 }
 
-// Intersection returns the not zero resource names that exist in both resources
+// Intersection 返回两个 Resource 中都存在且非零的资源名称集合。
 func Intersection(r1, r2 *Resource) ResourceNameList {
 	intersection := ResourceNameList{}
 	r1Names := r1.ResourceNames()
 	r2Names := r2.ResourceNames()
+
 	nameSet := map[v1.ResourceName]struct{}{}
 	for _, name := range r1Names {
 		nameSet[name] = struct{}{}
 	}
 	for _, name := range r2Names {
 		if _, exists := nameSet[name]; exists {
-			// r1Names and r2Names are from Resource.ResourceNames(), which already filtered the zero resources
+			// r1Names 和 r2Names 是由 ResourceNames() 生成的，已经过滤掉零资源
 			intersection = append(intersection, name)
 		}
 	}
 	return intersection
 }
 
-// IntersectionWithIgnoredScalarResources returns the not zero resource names that exist in both resources,
-// while ignoring the resources specified in ignoredScalarResources
+// IntersectionWithIgnoredScalarResources 返回两个 Resource 中都存在且非零的资源名称集合，
+// 同时忽略 ignoredScalarResources 中指定的 scalar 资源。
 func IntersectionWithIgnoredScalarResources(r1, r2 *Resource) ResourceNameList {
 	intersection := Intersection(r1, r2)
 	return intersection.FilteredIgnoredScalarResources()
 }
 
-// ExceededPart returns the partly resource in left which exceed right
+// ExceededPart 返回 left 中超出 right 的那一部分资源。
 func ExceededPart(left, right *Resource) *Resource {
 	if right == nil {
 		return left

@@ -41,9 +41,9 @@ func IsNodeSupportColocation(node *corev1.Node) bool {
 	return err == nil && b
 }
 
-// IsNodeSupportOverSubscription return whether a node is over subscription node.
-// IMPORTANT!!! When node has a overSubscription label, it indicates that node is a colocation node too,
-// because overSubscription resources are used by low priority workloads, it must be used in colocation case.
+// IsNodeSupportOverSubscription 返回该节点是否支持超卖。
+// 注意！！！当节点带有 overSubscription 标签时，表示该节点同时也是一个共置节点（colocation node）。
+// 因为超卖资源会被低优先级工作负载使用，所以它必须用于共置场景。
 func IsNodeSupportOverSubscription(node *corev1.Node) bool {
 	b, err := strconv.ParseBool(node.Labels[apis.OverSubscriptionNodeLabelKey])
 	return err == nil && b

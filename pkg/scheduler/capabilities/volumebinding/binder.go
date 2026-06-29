@@ -51,11 +51,10 @@ import (
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/volumebinding/metrics"
 )
 
-// ConflictReason is used for the special strings which explain why
-// volume binding is impossible for a node.
+// ConflictReason 表示导致某个节点无法满足卷绑定的原因字符串
 type ConflictReason string
 
-// ConflictReasons contains all reasons that explain why volume binding is impossible for a node.
+// ConflictReasons 是多个 ConflictReason 的集合
 type ConflictReasons []ConflictReason
 
 func (reasons ConflictReasons) Len() int           { return len(reasons) }
@@ -63,39 +62,39 @@ func (reasons ConflictReasons) Less(i, j int) bool { return reasons[i] < reasons
 func (reasons ConflictReasons) Swap(i, j int)      { reasons[i], reasons[j] = reasons[j], reasons[i] }
 
 const (
-	// ErrReasonBindConflict is used for VolumeBindingNoMatch predicate error.
+	// ErrReasonBindConflict：没有找到可用于绑定的 PV
 	ErrReasonBindConflict ConflictReason = "node(s) didn't find available persistent volumes to bind"
-	// ErrReasonNodeConflict is used for VolumeNodeAffinityConflict predicate error.
+	// ErrReasonNodeConflict：PV 的 node affinity 不匹配
 	ErrReasonNodeConflict ConflictReason = "node(s) didn't match PersistentVolume's node affinity"
-	// ErrReasonNotEnoughSpace is used when a pod cannot start on a node because not enough storage space is available.
+	// ErrReasonNotEnoughSpace：节点存储容量不足
 	ErrReasonNotEnoughSpace = "node(s) did not have enough free storage"
-	// ErrReasonPVNotExist is used when a pod has one or more PVC(s) bound to non-existent persistent volume(s)"
+	// ErrReasonPVNotExist：PVC 绑定到了不存在的 PV
 	ErrReasonPVNotExist = "node(s) unavailable due to one or more pvc(s) bound to non-existent pv(s)"
 )
 
-// BindingInfo holds a binding between PV and PVC.
+// BindingInfo 保存一个 PV 与 PVC 的绑定关系
 type BindingInfo struct {
-	// PVC that needs to be bound
+	// 需要绑定的 PVC
 	pvc *v1.PersistentVolumeClaim
 
-	// Proposed PV to bind to this PVC
+	// 准备绑定到该 PVC 的 PV
 	pv *v1.PersistentVolume
 }
 
-// StorageClassName returns the name of the storage class.
+// StorageClassName 返回 PV 的 StorageClass 名称
 func (b *BindingInfo) StorageClassName() string {
 	return b.pv.Spec.StorageClassName
 }
 
-// StorageResource represents storage resource.
+// StorageResource 表示存储资源信息
 type StorageResource struct {
 	Requested int64
 	Capacity  int64
 }
 
-// StorageResource returns storage resource.
+// StorageResource 返回该绑定关系对应的请求容量和 PV 容量
 func (b *BindingInfo) StorageResource() *StorageResource {
-	// both fields are mandatory
+	// 这里假设两个字段都存在
 	requestedQty := b.pvc.Spec.Resources.Requests[v1.ResourceName(v1.ResourceStorage)]
 	capacityQty := b.pv.Spec.Capacity[v1.ResourceName(v1.ResourceStorage)]
 	return &StorageResource{
@@ -104,111 +103,63 @@ func (b *BindingInfo) StorageResource() *StorageResource {
 	}
 }
 
-// DynamicProvision represents a dynamically provisioned volume.
+// DynamicProvision 表示需要动态创建的卷
 type DynamicProvision struct {
 	PVC          *v1.PersistentVolumeClaim
 	NodeCapacity *storagev1beta1.CSIStorageCapacity
 }
 
-// PodVolumes holds pod's volumes information used in volume scheduling.
+// PodVolumes 保存 Pod 的卷调度信息
 type PodVolumes struct {
-	// StaticBindings are binding decisions for PVCs which can be bound to
-	// pre-provisioned static PVs.
+	// StaticBindings 表示可通过现有 PV 静态绑定的 PVC
 	StaticBindings []*BindingInfo
-	// DynamicProvisions are PVCs that require dynamic provisioning
+	// DynamicProvisions 表示需要动态供给的 PVC
 	DynamicProvisions []*DynamicProvision
 }
 
-// InTreeToCSITranslator contains methods required to check migratable status
-// and perform translations from InTree PV's to CSI
+// InTreeToCSITranslator 负责判断 PV 是否可迁移以及完成转换
 type InTreeToCSITranslator interface {
 	IsPVMigratable(pv *v1.PersistentVolume) bool
 	GetInTreePluginNameFromSpec(pv *v1.PersistentVolume, vol *v1.Volume) (string, error)
 	TranslateInTreePVToCSI(logger klog.Logger, pv *v1.PersistentVolume) (*v1.PersistentVolume, error)
 }
 
-// SchedulerVolumeBinder is used by the scheduler VolumeBinding plugin to
-// handle PVC/PV binding and dynamic provisioning. The binding decisions are
-// integrated into the pod scheduling workflow so that the PV NodeAffinity is
-// also considered along with the pod's other scheduling requirements.
-//
-// This integrates into the existing scheduler workflow as follows:
-//  1. The scheduler takes a Pod off the scheduler queue and processes it serially:
-//     a. Invokes all pre-filter plugins for the pod. GetPodVolumeClaims() is invoked
-//     here, pod volume information will be saved in current scheduling cycle state for later use.
-//     b. Invokes all filter plugins, parallelized across nodes.  FindPodVolumes() is invoked here.
-//     c. Invokes all score plugins.  Future/TBD
-//     d. Selects the best node for the Pod.
-//     e. Invokes all reserve plugins. AssumePodVolumes() is invoked here.
-//     i.  If PVC binding is required, cache in-memory only:
-//     * For manual binding: update PV objects for prebinding to the corresponding PVCs.
-//     * For dynamic provisioning: update PVC object with a selected node from c)
-//     * For the pod, which PVCs and PVs need API updates.
-//     ii. Afterwards, the main scheduler caches the Pod->Node binding in the scheduler's pod cache,
-//     This is handled in the scheduler and not here.
-//     f. Asynchronously bind volumes and pod in a separate goroutine
-//     i.  BindPodVolumes() is called first in PreBind phase. It makes all the necessary API updates and waits for
-//     PV controller to fully bind and provision the PVCs. If binding fails, the Pod is sent
-//     back through the scheduler.
-//     ii. After BindPodVolumes() is complete, then the scheduler does the final Pod->Node binding.
-//  2. Once all the assume operations are done in e), the scheduler processes the next Pod in the scheduler queue
-//     while the actual binding operation occurs in the background.
+// SchedulerVolumeBinder 是 scheduler 的卷绑定接口
+// 它负责 PVC/PV 绑定，以及动态供给
 type SchedulerVolumeBinder interface {
-	// GetPodVolumeClaims returns a pod's PVCs separated into bound, unbound with delayed binding (including provisioning),
-	// unbound with immediate binding (including prebound) and PVs that belong to storage classes of unbound PVCs with delayed binding.
+	// GetPodVolumeClaims 返回 Pod 的 PVC 分类：
+	// 1.已绑定
+	// 2.未绑定且延迟绑定（包括动态供给）
+	// 3.未绑定且立即绑定（包括预绑定）
+	// 4.属于延迟绑定 PVC 所属 StorageClass 的可用 PV
 	GetPodVolumeClaims(logger klog.Logger, pod *v1.Pod) (podVolumeClaims *PodVolumeClaims, err error)
 
-	// FindPodVolumes checks if all of a Pod's PVCs can be satisfied by the
-	// node and returns pod's volumes information.
-	//
-	// If a PVC is bound, it checks if the PV's NodeAffinity matches the Node.
-	// Otherwise, it tries to find an available PV to bind to the PVC.
-	//
-	// It returns an error when something went wrong or a list of reasons why the node is
-	// (currently) not usable for the pod.
-	//
-	// If the CSIStorageCapacity feature is enabled, then it also checks for sufficient storage
-	// for volumes that still need to be created.
-	//
-	// This function is called by the scheduler VolumeBinding plugin and can be called in parallel
+	// FindPodVolumes 检查某个节点是否能满足 Pod 的卷要求
 	FindPodVolumes(logger klog.Logger, pod *v1.Pod, podVolumeClaims *PodVolumeClaims, node *v1.Node) (podVolumes *PodVolumes, reasons ConflictReasons, err error)
 
-	// AssumePodVolumes will:
-	// 1. Take the PV matches for unbound PVCs and update the PV cache assuming
-	// that the PV is prebound to the PVC.
-	// 2. Take the PVCs that need provisioning and update the PVC cache with related
-	// annotations set.
-	//
-	// It returns true if all volumes are fully bound
-	//
-	// This function is called serially.
+	// AssumePodVolumes 在调度器内部缓存中“假设”卷绑定成功
 	AssumePodVolumes(logger klog.Logger, assumedPod *v1.Pod, nodeName string, podVolumes *PodVolumes) (allFullyBound bool, err error)
 
-	// RevertAssumedPodVolumes will revert assumed PV and PVC cache.
+	// RevertAssumedPodVolumes 回滚缓存中的假设绑定
 	RevertAssumedPodVolumes(podVolumes *PodVolumes)
 
-	// BindPodVolumes will:
-	// 1. Initiate the volume binding by making the API call to prebind the PV
-	// to its matching PVC.
-	// 2. Trigger the volume provisioning by making the API call to set related
-	// annotations on the PVC
-	// 3. Wait for PVCs to be completely bound by the PV controller
-	//
-	// This function can be called in parallel.
+	// BindPodVolumes 进行真正的 API 更新，并等待绑定完成
 	BindPodVolumes(ctx context.Context, assumedPod *v1.Pod, podVolumes *PodVolumes) error
 }
 
+// PodVolumeClaims 保存 Pod 中 PVC 的分类结果
 type PodVolumeClaims struct {
-	// boundClaims are the pod's bound PVCs.
+	// boundClaims：已经绑定的 PVC
 	boundClaims []*v1.PersistentVolumeClaim
-	// unboundClaimsDelayBinding are the pod's unbound with delayed binding (including provisioning) PVCs.
+	// unboundClaimsDelayBinding：延迟绑定的未绑定 PVC
 	unboundClaimsDelayBinding []*v1.PersistentVolumeClaim
-	// unboundClaimsImmediate are the pod's unbound with immediate binding PVCs (i.e., supposed to be bound already) .
+	// unboundClaimsImmediate：立即绑定但当前还未绑定的 PVC
 	unboundClaimsImmediate []*v1.PersistentVolumeClaim
-	// unboundVolumesDelayBinding are PVs that belong to storage classes of the pod's unbound PVCs with delayed binding.
+	// unboundVolumesDelayBinding：属于延迟绑定 PVC 的可用 PV
 	unboundVolumesDelayBinding map[string][]*v1.PersistentVolume
 }
 
+// volumeBinder 是 SchedulerVolumeBinder 的实现
 type volumeBinder struct {
 	kubeClient                  clientset.Interface
 	enableVolumeAttributesClass bool
@@ -222,11 +173,12 @@ type volumeBinder struct {
 	pvcCache PVCAssumeCache
 	pvCache  PVAssumeCache
 
-	// Amount of time to wait for the bind operation to succeed
+	// 绑定等待超时时间
 	bindTimeout time.Duration
 
 	translator InTreeToCSITranslator
 
+	// 是否启用了容量检查
 	capacityCheckEnabled     bool
 	csiDriverLister          storagelisters.CSIDriverLister
 	csiStorageCapacityLister storagelistersv1beta1.CSIStorageCapacityLister
@@ -234,17 +186,13 @@ type volumeBinder struct {
 
 var _ SchedulerVolumeBinder = &volumeBinder{}
 
-// CapacityCheck contains additional parameters for NewVolumeBinder that
-// are only needed when checking volume sizes against available storage
-// capacity is desired.
+// CapacityCheck 包含容量检查需要的 informer
 type CapacityCheck struct {
 	CSIDriverInformer          storageinformers.CSIDriverInformer
 	CSIStorageCapacityInformer storageinformersv1beta1.CSIStorageCapacityInformer
 }
 
-// NewVolumeBinder sets up all the caches needed for the scheduler to make volume binding decisions.
-//
-// capacityCheck determines how storage capacity is checked (CSIStorageCapacity feature).
+// NewVolumeBinder 创建 volumeBinder 并初始化缓存
 func NewVolumeBinder(
 	logger klog.Logger,
 	kubeClient clientset.Interface,
@@ -257,11 +205,14 @@ func NewVolumeBinder(
 	storageClassInformer storageinformers.StorageClassInformer,
 	capacityCheck *CapacityCheck,
 	bindTimeout time.Duration) (SchedulerVolumeBinder, error) {
+
+	// 初始化 PVC / PV 假设缓存
 	pvcCache, err1 := NewPVCAssumeCache(logger, pvcInformer.Informer())
 	pvCache, err2 := NewPVAssumeCache(logger, pvInformer.Informer())
 	if err := errors.Join(err1, err2); err != nil {
 		return nil, err
 	}
+
 	b := &volumeBinder{
 		kubeClient:                  kubeClient,
 		enableVolumeAttributesClass: fts.EnableVolumeAttributesClass,
@@ -276,6 +227,7 @@ func NewVolumeBinder(
 		translator:                  csitrans.New(),
 	}
 
+	// 如果启用了容量检查，则初始化相关 lister
 	if capacityCheck != nil {
 		b.capacityCheckEnabled = true
 		b.csiDriverLister = capacityCheck.CSIDriverInformer.Lister()
@@ -284,22 +236,20 @@ func NewVolumeBinder(
 	return b, nil
 }
 
-// FindPodVolumes finds the matching PVs for PVCs and nodes to provision PVs
-// for the given pod and node. If the node does not fit, conflict reasons are
-// returned.
+// FindPodVolumes 查找某个节点是否能满足 Pod 卷绑定需求
 func (b *volumeBinder) FindPodVolumes(logger klog.Logger, pod *v1.Pod, podVolumeClaims *PodVolumeClaims, node *v1.Node) (podVolumes *PodVolumes, reasons ConflictReasons, err error) {
 	podVolumes = &PodVolumes{}
 
-	// Warning: Below log needs high verbosity as it can be printed several times (#60933).
+	// 这里日志级别较高，因为可能会被频繁打印
 	logger.V(5).Info("FindPodVolumes", "pod", klog.KObj(pod), "node", klog.KObj(node))
 
-	// Initialize to true for pods that don't have volumes. These
-	// booleans get translated into reason strings when the function
-	// returns without an error.
+	// 下面几个标志位用于最终构造冲突原因
 	unboundVolumesSatisfied := true
 	boundVolumesSatisfied := true
 	sufficientStorage := true
 	boundPVsFound := true
+
+	// 根据检查结果生成冲突原因
 	defer func() {
 		if err != nil {
 			return
@@ -318,6 +268,7 @@ func (b *volumeBinder) FindPodVolumes(logger klog.Logger, pod *v1.Pod, podVolume
 		}
 	}()
 
+	// 统计调度阶段失败指标
 	defer func() {
 		if err != nil {
 			metrics.VolumeSchedulingStageFailed.WithLabelValues("predicate").Inc()
@@ -328,9 +279,9 @@ func (b *volumeBinder) FindPodVolumes(logger klog.Logger, pod *v1.Pod, podVolume
 		staticBindings    []*BindingInfo
 		dynamicProvisions []*DynamicProvision
 	)
+
+	// 统一把空切片归一成 nil，便于测试和后续判断
 	defer func() {
-		// Although we do not distinguish nil from empty in this function, for
-		// easier testing, we normalize empty to nil.
 		if len(staticBindings) == 0 {
 			staticBindings = nil
 		}
@@ -341,7 +292,7 @@ func (b *volumeBinder) FindPodVolumes(logger klog.Logger, pod *v1.Pod, podVolume
 		podVolumes.DynamicProvisions = dynamicProvisions
 	}()
 
-	// Check PV node affinity on bound volumes
+	// 先检查已经绑定的 PVC 对应的 PV 的 node affinity
 	if len(podVolumeClaims.boundClaims) > 0 {
 		boundVolumesSatisfied, boundPVsFound, err = b.checkBoundClaims(logger, podVolumeClaims.boundClaims, node, pod)
 		if err != nil {
@@ -349,18 +300,18 @@ func (b *volumeBinder) FindPodVolumes(logger klog.Logger, pod *v1.Pod, podVolume
 		}
 	}
 
-	// Find matching volumes and node for unbound claims
+	// 处理未绑定但支持延迟绑定的 PVC
 	if len(podVolumeClaims.unboundClaimsDelayBinding) > 0 {
 		var (
 			claimsToFindMatching []*v1.PersistentVolumeClaim
 			claimsToProvision    []*v1.PersistentVolumeClaim
 		)
 
-		// Filter out claims to provision
+		// 如果 PVC 上已经指定了 selectedNode，说明它只能在该节点上动态供给
 		for _, claim := range podVolumeClaims.unboundClaimsDelayBinding {
 			if selectedNode, ok := claim.Annotations[volume.AnnSelectedNode]; ok {
 				if selectedNode != node.Name {
-					// Fast path, skip unmatched node.
+					// 如果节点不匹配，直接判失败
 					unboundVolumesSatisfied = false
 					return
 				}
@@ -370,19 +321,34 @@ func (b *volumeBinder) FindPodVolumes(logger klog.Logger, pod *v1.Pod, podVolume
 			}
 		}
 
-		// Find matching volumes
+		// 为未绑定 PVC 寻找已存在的、可静态绑定的 PV
 		if len(claimsToFindMatching) > 0 {
 			var unboundClaims []*v1.PersistentVolumeClaim
+			/*
+				按 PVC 请求容量从小到大排序，优先满足小卷；
+				对每个 PVC，从其 StorageClass 对应的候选 PV 列表中，调用 volume.FindMatchingVolume 寻找匹配 PV；
+				使用 chosenPVs 防止同一个 PV 被多个 PVC 选中；
+				找到则生成 BindingInfo，未找到则加入 unboundClaim
+
+			*/
 			unboundVolumesSatisfied, staticBindings, unboundClaims, err = b.findMatchingVolumes(logger, pod, claimsToFindMatching, podVolumeClaims.unboundVolumesDelayBinding, node)
 			if err != nil {
 				return
 			}
+			// 没找到静态 PV 的 PVC，后面尝试动态供给
 			claimsToProvision = append(claimsToProvision, unboundClaims...)
 		}
 
-		// Check for claims to provision. This is the first time where we potentially
-		// find out that storage is not sufficient for the node.
+		// 为找不到静态 PV 的 PVC 检查能否动态供给新卷
 		if len(claimsToProvision) > 0 {
+			/*
+				对每个 PVC，获取其 StorageClass；
+				检查 provisioner 是否支持动态供给；
+				检查节点是否满足 StorageClass 的 AllowedTopologies 拓扑约束；
+				如果启用了容量检查，再检查 CSIStorageCapacity 是否足够；
+				通过则生成 DynamicProvision。
+
+			*/
 			unboundVolumesSatisfied, sufficientStorage, dynamicProvisions, err = b.checkVolumeProvisions(logger, pod, claimsToProvision, node)
 			if err != nil {
 				return
@@ -393,8 +359,7 @@ func (b *volumeBinder) FindPodVolumes(logger klog.Logger, pod *v1.Pod, podVolume
 	return
 }
 
-// ConvertDynamicProvisionsToPVCs converts a slice of *DynamicProvision to a
-// slice of PersistentVolumeClaim
+// convertDynamicProvisionsToPVCs 将 DynamicProvision 切片转换成 PVC 切片
 func convertDynamicProvisionsToPVCs(dynamicProvisions []*DynamicProvision) []*v1.PersistentVolumeClaim {
 	pvcs := make([]*v1.PersistentVolumeClaim, 0, len(dynamicProvisions))
 	for _, dynamicProvision := range dynamicProvisions {
@@ -403,11 +368,7 @@ func convertDynamicProvisionsToPVCs(dynamicProvisions []*DynamicProvision) []*v1
 	return pvcs
 }
 
-// AssumePodVolumes will take the matching PVs and PVCs to provision in pod's
-// volume information for the chosen node, and:
-// 1. Update the pvCache with the new prebound PV.
-// 2. Update the pvcCache with the new PVCs with annotations set
-// 3. Update PodVolumes again with cached API updates for PVs and PVCs.
+// AssumePodVolumes 在调度器缓存中假设卷绑定成功
 func (b *volumeBinder) AssumePodVolumes(logger klog.Logger, assumedPod *v1.Pod, nodeName string, podVolumes *PodVolumes) (allFullyBound bool, err error) {
 	logger.V(4).Info("AssumePodVolumes", "pod", klog.KObj(assumedPod), "node", klog.KRef("", nodeName))
 	defer func() {
@@ -416,12 +377,13 @@ func (b *volumeBinder) AssumePodVolumes(logger klog.Logger, assumedPod *v1.Pod, 
 		}
 	}()
 
+	// 如果 Pod 的卷已经全部绑定，就不用处理
 	if allBound := b.arePodVolumesBound(logger, assumedPod); allBound {
 		logger.V(4).Info("AssumePodVolumes: all PVCs bound and nothing to do", "pod", klog.KObj(assumedPod), "node", klog.KRef("", nodeName))
 		return true, nil
 	}
 
-	// Assume PV
+	// 1) 先假设静态 PV 绑定成功
 	newBindings := []*BindingInfo{}
 	for _, binding := range podVolumes.StaticBindings {
 		newPV, dirty, err := volume.GetBindVolumeToClaim(binding.pv, binding.pvc)
@@ -437,7 +399,7 @@ func (b *volumeBinder) AssumePodVolumes(logger klog.Logger, assumedPod *v1.Pod, 
 			b.revertAssumedPVs(newBindings)
 			return false, err
 		}
-		// TODO: can we assume every time?
+		// dirty 表示 PV 发生了需要缓存更新的变化
 		if dirty {
 			err = b.pvCache.Assume(newPV)
 			if err != nil {
@@ -448,11 +410,10 @@ func (b *volumeBinder) AssumePodVolumes(logger klog.Logger, assumedPod *v1.Pod, 
 		newBindings = append(newBindings, &BindingInfo{pv: newPV, pvc: binding.pvc})
 	}
 
-	// Assume PVCs
+	// 2) 再假设动态供给所需的 PVC 已经写入 selectedNode
 	newProvisionedPVCs := []*DynamicProvision{}
 	for _, dynamicProvision := range podVolumes.DynamicProvisions {
-		// The claims from method args can be pointing to watcher cache. We must not
-		// modify these, therefore create a copy.
+		// 这里必须 deep copy，因为原始对象可能来自 informer cache
 		claimClone := dynamicProvision.PVC.DeepCopy()
 		metav1.SetMetaDataAnnotation(&claimClone.ObjectMeta, volume.AnnSelectedNode, nodeName)
 		err = b.pvcCache.Assume(claimClone)
@@ -471,16 +432,14 @@ func (b *volumeBinder) AssumePodVolumes(logger klog.Logger, assumedPod *v1.Pod, 
 	return
 }
 
-// RevertAssumedPodVolumes will revert assumed PV and PVC cache.
+// RevertAssumedPodVolumes 回滚假设绑定
 func (b *volumeBinder) RevertAssumedPodVolumes(podVolumes *PodVolumes) {
 	pvcs := convertDynamicProvisionsToPVCs(podVolumes.DynamicProvisions)
 	b.revertAssumedPVs(podVolumes.StaticBindings)
 	b.revertAssumedPVCs(pvcs)
 }
 
-// BindPodVolumes gets the cached bindings and PVCs to provision in pod's volumes information,
-// makes the API update for those PVs/PVCs, and waits for the PVCs to be completely bound
-// by the PV controller.
+// BindPodVolumes 执行真正的 API 更新，并等待绑定结果
 func (b *volumeBinder) BindPodVolumes(ctx context.Context, assumedPod *v1.Pod, podVolumes *PodVolumes) (err error) {
 	logger := klog.FromContext(ctx)
 	logger.V(4).Info("BindPodVolumes", "pod", klog.KObj(assumedPod), "node", klog.KRef("", assumedPod.Spec.NodeName))
@@ -499,12 +458,13 @@ func (b *volumeBinder) BindPodVolumes(ctx context.Context, assumedPod *v1.Pod, p
 	bindings := podVolumes.StaticBindings
 	claimsToProvision := convertDynamicProvisionsToPVCs(podVolumes.DynamicProvisions)
 
-	// Start API operations
+	// 开始执行 API 更新
 	err = b.bindAPIUpdate(ctx, assumedPod, bindings, claimsToProvision)
 	if err != nil {
 		return err
 	}
 
+	// 轮询等待绑定完成
 	err = wait.PollUntilContextTimeout(ctx, time.Second, b.bindTimeout, false, func(ctx context.Context) (bool, error) {
 		b, err := b.checkBindings(logger, assumedPod, bindings, claimsToProvision)
 		return b, err
@@ -523,7 +483,7 @@ func getPVCName(pvc *v1.PersistentVolumeClaim) string {
 	return pvc.Namespace + "/" + pvc.Name
 }
 
-// bindAPIUpdate makes the API update for those PVs/PVCs.
+// bindAPIUpdate 负责真正发起 PV/PVC 的 API 更新
 func (b *volumeBinder) bindAPIUpdate(ctx context.Context, pod *v1.Pod, bindings []*BindingInfo, claimsToProvision []*v1.PersistentVolumeClaim) error {
 	logger := klog.FromContext(ctx)
 	podName := getPodName(pod)
@@ -536,12 +496,12 @@ func (b *volumeBinder) bindAPIUpdate(ctx context.Context, pod *v1.Pod, bindings 
 
 	lastProcessedBinding := 0
 	lastProcessedProvisioning := 0
+
+	// 如果中途失败，仅回滚尚未完成的假设缓存
 	defer func() {
-		// only revert assumed cached updates for volumes we haven't successfully bound
 		if lastProcessedBinding < len(bindings) {
 			b.revertAssumedPVs(bindings[lastProcessedBinding:])
 		}
-		// only revert assumed cached updates for claims we haven't updated,
 		if lastProcessedProvisioning < len(claimsToProvision) {
 			b.revertAssumedPVCs(claimsToProvision[lastProcessedProvisioning:])
 		}
@@ -553,10 +513,8 @@ func (b *volumeBinder) bindAPIUpdate(ctx context.Context, pod *v1.Pod, bindings 
 		claim   *v1.PersistentVolumeClaim
 	)
 
-	// Do the actual prebinding. Let the PV controller take care of the rest
-	// There is no API rollback if the actual binding fails
+	// 先更新 PV，让它预绑定到 PVC
 	for _, binding = range bindings {
-		// TODO: does it hurt if we make an api call and nothing needs to be updated?
 		logger.V(5).Info("Updating PersistentVolume: binding to claim", "pod", klog.KObj(pod), "PV", klog.KObj(binding.pv), "PVC", klog.KObj(binding.pvc))
 		newPV, err := b.kubeClient.CoreV1().PersistentVolumes().Update(ctx, binding.pv, metav1.UpdateOptions{})
 		if err != nil {
@@ -564,14 +522,12 @@ func (b *volumeBinder) bindAPIUpdate(ctx context.Context, pod *v1.Pod, bindings 
 			return err
 		}
 
-		logger.V(2).Info("Updated PersistentVolume with claim. Waiting for binding to complete", "pod", klog.KObj(pod), "PV", klog.KObj(binding.pv), "PVC", klog.KObj(binding.pvc))
-		// Save updated object from apiserver for later checking.
+		// 保存 API Server 返回的最新对象
 		binding.pv = newPV
 		lastProcessedBinding++
 	}
 
-	// Update claims objects to trigger volume provisioning. Let the PV controller take care of the rest
-	// PV controller is expected to signal back by removing related annotations if actual provisioning fails
+	// 再更新 PVC，触发动态供给
 	for i, claim = range claimsToProvision {
 		logger.V(5).Info("Updating claims objects to trigger volume provisioning", "pod", klog.KObj(pod), "PVC", klog.KObj(claim))
 		newClaim, err := b.kubeClient.CoreV1().PersistentVolumeClaims(claim.Namespace).Update(ctx, claim, metav1.UpdateOptions{})
@@ -580,7 +536,6 @@ func (b *volumeBinder) bindAPIUpdate(ctx context.Context, pod *v1.Pod, bindings 
 			return err
 		}
 
-		// Save updated object from apiserver for later checking.
 		claimsToProvision[i] = newClaim
 		lastProcessedProvisioning++
 	}
@@ -590,16 +545,9 @@ func (b *volumeBinder) bindAPIUpdate(ctx context.Context, pod *v1.Pod, bindings 
 
 var versioner = storage.APIObjectVersioner{}
 
-// checkBindings runs through all the PVCs in the Pod and checks:
-// * if the PVC is fully bound
-// * if there are any conditions that require binding to fail and be retried
-//
-// It returns true when all of the Pod's PVCs are fully bound, and error if
-// binding (and scheduling) needs to be retried
-// Note that it checks on API objects not PV/PVC cache, this is because
-// PV/PVC cache can be assumed again in main scheduler loop, we must check
-// latest state in API server which are shared with PV controller and
-// provisioners
+// checkBindings 检查绑定结果是否真正完成
+// 这里检查的是 API Server 中的对象，而不是本地 cache
+// 原因是 cache 可能存在延迟，必须确认最新状态
 func (b *volumeBinder) checkBindings(logger klog.Logger, pod *v1.Pod, bindings []*BindingInfo, claimsToProvision []*v1.PersistentVolumeClaim) (bool, error) {
 	podName := getPodName(pod)
 	if bindings == nil {
@@ -616,14 +564,11 @@ func (b *volumeBinder) checkBindings(logger klog.Logger, pod *v1.Pod, bindings [
 
 	csiNode, err := b.csiNodeLister.Get(node.Name)
 	if err != nil {
-		// TODO: return the error once CSINode is created by default
+		// CSINode 可能还没创建，暂时容忍
 		logger.V(4).Info("Could not get a CSINode object for the node", "node", klog.KObj(node), "err", err)
 	}
 
-	// Check for any conditions that might require scheduling retry
-
-	// When pod is deleted, binding operation should be cancelled. There is no
-	// need to check PV/PVC bindings any more.
+	// 如果 Pod 已被删除，则中止后续绑定检查
 	_, err = b.podLister.Pods(pod.Namespace).Get(pod.Name)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
@@ -632,6 +577,7 @@ func (b *volumeBinder) checkBindings(logger klog.Logger, pod *v1.Pod, bindings [
 		logger.Error(err, "Failed to get pod from the lister", "pod", klog.KObj(pod))
 	}
 
+	// 检查静态绑定的 PV/PVC
 	for _, binding := range bindings {
 		pv, err := b.pvCache.GetAPIObj(binding.pv.Name)
 		if err != nil {
@@ -643,8 +589,7 @@ func (b *volumeBinder) checkBindings(logger klog.Logger, pod *v1.Pod, bindings [
 			return false, fmt.Errorf("failed to check binding: %w", err)
 		}
 
-		// Because we updated PV in apiserver, skip if API object is older
-		// and wait for new API object propagated from apiserver.
+		// 如果缓存对象比已更新对象旧，则等待 cache 同步
 		if versioner.CompareResourceVersion(binding.pv, pv) > 0 {
 			return false, nil
 		}
@@ -654,55 +599,50 @@ func (b *volumeBinder) checkBindings(logger klog.Logger, pod *v1.Pod, bindings [
 			return false, fmt.Errorf("failed to translate pv to csi: %w", err)
 		}
 
-		// Check PV's node affinity (the node might not have the proper label)
+		// 检查 PV 的 node affinity 是否满足当前 node
 		if err := volume.CheckNodeAffinity(pv, node.Labels); err != nil {
 			return false, fmt.Errorf("pv %q node affinity doesn't match node %q: %w", pv.Name, node.Name, err)
 		}
 
-		// Check if pv.ClaimRef got dropped by unbindVolume()
+		// ClaimRef 不能被清空
 		if pv.Spec.ClaimRef == nil || pv.Spec.ClaimRef.UID == "" {
 			return false, fmt.Errorf("ClaimRef got reset for pv %q", pv.Name)
 		}
 
-		// Check if pvc is fully bound
+		// PVC 必须已经完全绑定
 		if !b.isPVCFullyBound(pvc) {
 			return false, nil
 		}
 	}
 
+	// 检查动态供给的 PVC
 	for _, claim := range claimsToProvision {
 		pvc, err := b.pvcCache.GetAPIObj(getPVCName(claim))
 		if err != nil {
 			return false, fmt.Errorf("failed to check provisioning pvc: %w", err)
 		}
 
-		// Because we updated PVC in apiserver, skip if API object is older
-		// and wait for new API object propagated from apiserver.
+		// 如果 cache 还没同步到最新版本，先等待
 		if versioner.CompareResourceVersion(claim, pvc) > 0 {
 			return false, nil
 		}
 
-		// Check if selectedNode annotation is still set
+		// selectedNode 注解必须还在
 		if pvc.Annotations == nil {
 			return false, fmt.Errorf("selectedNode annotation reset for PVC %q", pvc.Name)
 		}
 		selectedNode := pvc.Annotations[volume.AnnSelectedNode]
 		if selectedNode != pod.Spec.NodeName {
-			// If provisioner fails to provision a volume, selectedNode
-			// annotation will be removed to signal back to the scheduler to
-			// retry.
+			// 如果 provision 失败，通常会移除 selectedNode
 			return false, fmt.Errorf("provisioning failed for PVC %q", pvc.Name)
 		}
 
-		// If the PVC is bound to a PV, check its node affinity
+		// 如果 PVC 已经绑定 PV，那么检查该 PV 的 node affinity
 		if pvc.Spec.VolumeName != "" {
 			pv, err := b.pvCache.GetAPIObj(pvc.Spec.VolumeName)
 			if err != nil {
 				if apierrors.IsNotFound(err) {
-					// We tolerate NotFound error here, because PV is possibly
-					// not found because of API delay, we can check next time.
-					// And if PV does not exist because it's deleted, PVC will
-					// be unbound eventually.
+					// 可能只是 API 延迟，稍后再试
 					return false, nil
 				}
 				return false, fmt.Errorf("failed to get pv %q from cache: %w", pvc.Spec.VolumeName, err)
@@ -718,26 +658,40 @@ func (b *volumeBinder) checkBindings(logger klog.Logger, pod *v1.Pod, bindings [
 			}
 		}
 
-		// Check if pvc is fully bound
+		// PVC 必须完全绑定
 		if !b.isPVCFullyBound(pvc) {
 			return false, nil
 		}
 	}
 
-	// All pvs and pvcs that we operated on are bound
 	logger.V(2).Info("All PVCs for pod are bound", "pod", klog.KObj(pod))
 	return true, nil
 }
 
+// isVolumeBound 判断某个 volume 是否已经绑定
 func (b *volumeBinder) isVolumeBound(logger klog.Logger, pod *v1.Pod, vol *v1.Volume) (bound bool, pvc *v1.PersistentVolumeClaim, err error) {
 	pvcName := ""
 	isEphemeral := false
+
 	switch {
 	case vol.PersistentVolumeClaim != nil:
+		/*
+			volumes:
+			- name: data
+			  persistentVolumeClaim:
+				claimName: my-pvc
+		*/
 		pvcName = vol.PersistentVolumeClaim.ClaimName
 	case vol.Ephemeral != nil:
-		// Generic ephemeral inline volumes also use a PVC,
-		// just with a computed name, and...
+		// inline ephemeral volume 也会对应一个 PVC，只是名字是计算出来的
+		/*
+			volumes:
+			- name: cache
+			  ephemeral:
+			    volumeClaimTemplate:
+			      spec:
+			        storageClassName: standard
+		*/
 		pvcName = ephemeral.VolumeClaimName(pod, vol)
 		isEphemeral = true
 	default:
@@ -745,7 +699,8 @@ func (b *volumeBinder) isVolumeBound(logger klog.Logger, pod *v1.Pod, vol *v1.Vo
 	}
 
 	bound, pvc, err = b.isPVCBound(logger, pod.Namespace, pvcName)
-	// ... the PVC must be owned by the pod.
+
+	// ephemeral PVC 必须属于当前 Pod
 	if isEphemeral && err == nil && pvc != nil {
 		if err := ephemeral.VolumeIsForPod(pod, pvc); err != nil {
 			return false, nil, err
@@ -754,6 +709,7 @@ func (b *volumeBinder) isVolumeBound(logger klog.Logger, pod *v1.Pod, vol *v1.Vo
 	return
 }
 
+// isPVCBound 判断 PVC 是否绑定完成
 func (b *volumeBinder) isPVCBound(logger klog.Logger, namespace, pvcName string) (bool, *v1.PersistentVolumeClaim, error) {
 	claim := &v1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
@@ -780,23 +736,34 @@ func (b *volumeBinder) isPVCBound(logger klog.Logger, namespace, pvcName string)
 	return fullyBound, pvc, nil
 }
 
+// isPVCFullyBound 判断 PVC 是否“完全绑定”
+// 这里要求：
+/*
+1. PVC.Spec.VolumeName != ""
+2. PVC 上有 AnnBindCompleted 注解
+
+spec:
+  volumeName: pv-demo
+metadata:
+  annotations:
+    volume.kubernetes.io/bind-completed: "yes"
+*/
 func (b *volumeBinder) isPVCFullyBound(pvc *v1.PersistentVolumeClaim) bool {
 	return pvc.Spec.VolumeName != "" && metav1.HasAnnotation(pvc.ObjectMeta, volume.AnnBindCompleted)
 }
 
-// arePodVolumesBound returns true if all volumes are fully bound
+// arePodVolumesBound 判断 Pod 的所有卷是否都已经绑定
 func (b *volumeBinder) arePodVolumesBound(logger klog.Logger, pod *v1.Pod) bool {
 	for _, vol := range pod.Spec.Volumes {
 		if isBound, _, _ := b.isVolumeBound(logger, pod, &vol); !isBound {
-			// Pod has at least one PVC that needs binding
+			// 只要有一个卷未绑定，就返回 false
 			return false
 		}
 	}
 	return true
 }
 
-// GetPodVolumeClaims returns a pod's PVCs separated into bound, unbound with delayed binding (including provisioning),
-// unbound with immediate binding (including prebound) and PVs that belong to storage classes of unbound PVCs with delayed binding.
+// GetPodVolumeClaims 收集 Pod 中所有 PVC，并进行分类
 func (b *volumeBinder) GetPodVolumeClaims(logger klog.Logger, pod *v1.Pod) (podVolumeClaims *PodVolumeClaims, err error) {
 	podVolumeClaims = &PodVolumeClaims{
 		boundClaims:               []*v1.PersistentVolumeClaim{},
@@ -815,25 +782,24 @@ func (b *volumeBinder) GetPodVolumeClaims(logger klog.Logger, pod *v1.Pod) (podV
 		if volumeBound {
 			podVolumeClaims.boundClaims = append(podVolumeClaims.boundClaims, pvc)
 		} else {
+			// 判断 PVC 是否是延迟绑定模式
 			delayBindingMode, err := volume.IsDelayBindingMode(pvc, b.classLister)
 			if err != nil {
 				return podVolumeClaims, err
 			}
-			// Prebound PVCs are treated as unbound immediate binding
+			// 预绑定 PVC 也归入 immediate
 			if delayBindingMode && pvc.Spec.VolumeName == "" {
-				// Scheduler path
 				podVolumeClaims.unboundClaimsDelayBinding = append(podVolumeClaims.unboundClaimsDelayBinding, pvc)
 			} else {
-				// !delayBindingMode || pvc.Spec.VolumeName != ""
-				// Immediate binding should have already been bound
+				// 非延迟绑定或已指定 VolumeName 的 PVC
 				podVolumeClaims.unboundClaimsImmediate = append(podVolumeClaims.unboundClaimsImmediate, pvc)
 			}
 		}
 	}
 
+	// 收集所有延迟绑定 PVC 对应 StorageClass 下的可用 PV
 	podVolumeClaims.unboundVolumesDelayBinding = map[string][]*v1.PersistentVolume{}
 	for _, pvc := range podVolumeClaims.unboundClaimsDelayBinding {
-		// Get storage class name from each PVC
 		storageClassName := volume.GetPersistentVolumeClaimClass(pvc)
 		pvs, err := b.pvCache.ListPVs(storageClassName)
 		if err != nil {
@@ -844,10 +810,23 @@ func (b *volumeBinder) GetPodVolumeClaims(logger klog.Logger, pod *v1.Pod) (podV
 	return podVolumeClaims, nil
 }
 
+// checkBoundClaims 检查已经绑定的 PVC 所对应的 PV 是否能在当前节点上使用。
+//
+// 返回值说明（与上层 FindPodVolumes 中的 boundVolumesSatisfied、boundPVsFound 对应）：
+//   - 第一个 bool：boundVolumesSatisfied，表示 PV 的节点亲和性是否都满足；
+//   - 第二个 bool：boundPVsFound，表示所有 PV 是否都成功从缓存中找到；
+//   - error：处理过程中发生的错误。
+//
+// 处理流程：
+//  1. 获取当前节点对应的 CSINode 对象，用于判断 CSI 迁移状态；
+//  2. 遍历每个已绑定 PVC，从 PV 缓存中取出对应 PV；
+//  3. 调用 tryTranslatePVToCSI 将 in-tree PV 翻译成 CSI PV（如果该 PV/节点已迁移）；
+//  4. 使用 volume.CheckNodeAffinity 校验 PV 的节点亲和性与当前节点标签是否匹配。
 func (b *volumeBinder) checkBoundClaims(logger klog.Logger, claims []*v1.PersistentVolumeClaim, node *v1.Node, pod *v1.Pod) (bool, bool, error) {
 	csiNode, err := b.csiNodeLister.Get(node.Name)
 	if err != nil {
-		// TODO: return the error once CSINode is created by default
+		// CSINode 对象可能暂时不存在，这通常发生在节点刚注册时。
+		// 此时 CSI 迁移无法进行，但不影响 PV 节点亲和性检查，因此仅记录日志后继续。
 		logger.V(4).Info("Could not get a CSINode object for the node", "node", klog.KObj(node), "err", err)
 	}
 
@@ -856,16 +835,21 @@ func (b *volumeBinder) checkBoundClaims(logger klog.Logger, claims []*v1.Persist
 		pv, err := b.pvCache.Get(pvName)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
+				// PV 缓存中未找到对应 PV，返回 boundVolumesSatisfied=true（尚未发现冲突）、
+				// boundPVsFound=false，通知上层记录 ErrReasonPVNotExist。
 				err = nil
 			}
 			return true, false, err
 		}
 
+		// 尝试将 in-tree PV 翻译成 CSI PV。
+		// 如果该 PV 对应的 in-tree 插件在当前节点尚未迁移到 CSI，则返回原 PV 不变。
 		pv, err = b.tryTranslatePVToCSI(logger, pv, csiNode)
 		if err != nil {
 			return false, true, err
 		}
 
+		// 校验 PV 的节点亲和性（nodeAffinity）是否被当前节点满足。
 		err = volume.CheckNodeAffinity(pv, node.Labels)
 		if err != nil {
 			logger.V(4).Info("PersistentVolume and node mismatch for pod", "PV", klog.KRef("", pvName), "node", klog.KObj(node), "pod", klog.KObj(pod), "err", err)
@@ -878,22 +862,19 @@ func (b *volumeBinder) checkBoundClaims(logger klog.Logger, claims []*v1.Persist
 	return true, true, nil
 }
 
-// findMatchingVolumes tries to find matching volumes for given claims,
-// and return unbound claims for further provision.
+// findMatchingVolumes 为 PVC 找可绑定的 PV
 func (b *volumeBinder) findMatchingVolumes(logger klog.Logger, pod *v1.Pod, claimsToBind []*v1.PersistentVolumeClaim, unboundVolumesDelayBinding map[string][]*v1.PersistentVolume, node *v1.Node) (foundMatches bool, bindings []*BindingInfo, unboundClaims []*v1.PersistentVolumeClaim, err error) {
-	// Sort all the claims by increasing size request to get the smallest fits
+	// 按请求容量从小到大排序，优先满足小卷
 	sort.Sort(byPVCSize(claimsToBind))
 
 	chosenPVs := map[string]*v1.PersistentVolume{}
-
 	foundMatches = true
 
 	for _, pvc := range claimsToBind {
-		// Get storage class name from each PVC
 		storageClassName := volume.GetPersistentVolumeClaimClass(pvc)
 		pvs := unboundVolumesDelayBinding[storageClassName]
 
-		// Find a matching PV
+		// 在候选 PV 中找一个匹配当前 PVC 和 node 的 PV
 		pv, err := volume.FindMatchingVolume(pvc, pvs, node, chosenPVs, true, b.enableVolumeAttributesClass)
 		if err != nil {
 			return false, nil, nil, err
@@ -905,7 +886,7 @@ func (b *volumeBinder) findMatchingVolumes(logger klog.Logger, pod *v1.Pod, clai
 			continue
 		}
 
-		// matching PV needs to be excluded so we don't select it again
+		// 防止同一个 PV 被多个 PVC 选中
 		chosenPVs[pv.Name] = pv
 		bindings = append(bindings, &BindingInfo{pv: pv, pvc: pvc})
 		logger.V(5).Info("Found matching PV for PVC for pod", "PV", klog.KObj(pv), "PVC", klog.KObj(pvc), "node", klog.KObj(node), "pod", klog.KObj(pod))
@@ -918,14 +899,26 @@ func (b *volumeBinder) findMatchingVolumes(logger klog.Logger, pod *v1.Pod, clai
 	return
 }
 
-// checkVolumeProvisions checks given unbound claims (the claims have gone through func
-// findMatchingVolumes, and do not have matching volumes for binding), and return true
-// if all of the claims are eligible for dynamic provision.
+// checkVolumeProvisions 检查这些未绑定 PVC 是否可以动态供给
+/*
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: alicloud-disk
+provisioner: diskplugin.csi.alibabacloud.com
+reclaimPolicy: Delete
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+allowedTopologies:
+  - matchLabelExpressions:
+      - key: topology.diskplugin.csi.alibabacloud.com/zone
+        values:
+          - cn-hangzhou-a
+          - cn-hangzhou-b
+*/
 func (b *volumeBinder) checkVolumeProvisions(logger klog.Logger, pod *v1.Pod, claimsToProvision []*v1.PersistentVolumeClaim, node *v1.Node) (provisionSatisfied, sufficientStorage bool, dynamicProvisions []*DynamicProvision, err error) {
 	dynamicProvisions = []*DynamicProvision{}
 
-	// We return early with provisionedClaims == nil if a check
-	// fails or we encounter an error.
 	for _, claim := range claimsToProvision {
 		pvcName := getPVCName(claim)
 		className := volume.GetPersistentVolumeClaimClass(claim)
@@ -943,19 +936,18 @@ func (b *volumeBinder) checkVolumeProvisions(logger klog.Logger, pod *v1.Pod, cl
 			return false, true, nil, nil
 		}
 
-		// Check if the node can satisfy the topology requirement in the class
+		// 检查节点是否满足拓扑约束
 		if !v1helper.MatchTopologySelectorTerms(class.AllowedTopologies, labels.Set(node.Labels)) {
 			logger.V(4).Info("Node cannot satisfy provisioning topology requirements of claim", "node", klog.KObj(node), "PVC", klog.KObj(claim))
 			return false, true, nil, nil
 		}
 
-		// Check storage capacity.
+		// 检查容量是否足够
 		sufficient, capacity, err := b.hasEnoughCapacity(logger, provisioner, claim, class, node)
 		if err != nil {
 			return false, false, nil, err
 		}
 		if !sufficient {
-			// hasEnoughCapacity logs an explanation.
 			return true, false, nil, nil
 		}
 
@@ -969,40 +961,38 @@ func (b *volumeBinder) checkVolumeProvisions(logger klog.Logger, pod *v1.Pod, cl
 	return true, true, dynamicProvisions, nil
 }
 
+// revertAssumedPVs 回滚假设绑定的 PV
 func (b *volumeBinder) revertAssumedPVs(bindings []*BindingInfo) {
 	for _, BindingInfo := range bindings {
 		b.pvCache.Restore(BindingInfo.pv)
 	}
 }
 
+// revertAssumedPVCs 回滚假设绑定的 PVC
 func (b *volumeBinder) revertAssumedPVCs(claims []*v1.PersistentVolumeClaim) {
 	for _, claim := range claims {
 		b.pvcCache.Restore(claim)
 	}
 }
 
-// hasEnoughCapacity checks whether the provisioner has enough capacity left for a new volume of the given size
-// that is available from the node. This function returns the node capacity based on the PVC's storage class.
+// hasEnoughCapacity 检查某个节点是否有足够的 CSI 存储容量
 func (b *volumeBinder) hasEnoughCapacity(logger klog.Logger, provisioner string, claim *v1.PersistentVolumeClaim, storageClass *storagev1.StorageClass, node *v1.Node) (bool, *storagev1beta1.CSIStorageCapacity, error) {
-	// This is an optional feature. If disabled, we assume that
-	// there is enough storage.
+	// 未启用容量检查时，默认认为容量足够
 	if !b.capacityCheckEnabled {
 		return true, nil, nil
 	}
 
 	quantity, ok := claim.Spec.Resources.Requests[v1.ResourceStorage]
 	if !ok {
-		// No capacity to check for.
+		// PVC 没有请求 storage，则无需检查
 		return true, nil, nil
 	}
 
-	// Only enabled for CSI drivers which opt into it.
+	// 只对声明支持 CSI 容量检查的 driver 做检查
 	driver, err := b.csiDriverLister.Get(provisioner)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			// Either the provisioner is not a CSI driver or the driver does not
-			// opt into storage capacity scheduling. Either way, skip
-			// capacity checking.
+			// 不是 CSI driver，或者 driver 不支持容量调度
 			return true, nil, nil
 		}
 		return false, nil, err
@@ -1011,8 +1001,20 @@ func (b *volumeBinder) hasEnoughCapacity(logger klog.Logger, provisioner string,
 		return true, nil, nil
 	}
 
-	// Look for a matching CSIStorageCapacity object(s).
-	// TODO (for beta): benchmark this and potentially introduce some kind of lookup structure (https://github.com/kubernetes/enhancements/issues/1698#issuecomment-654356718).
+	// 查找 CSIStorageCapacity 对象
+	/*
+		apiVersion: storage.k8s.io/v1
+		kind: CSIStorageCapacity
+		metadata:
+		  name: example
+		storageClassName: alicloud-disk
+		capacity: 100Gi
+		nodeTopology:
+		  matchLabelExpressions:
+		    - key: topology.diskplugin.csi.alibabacloud.com/zone
+		      values:
+		        - cn-hangzhou-a
+	*/
 	capacities, err := b.csiStorageCapacityLister.List(labels.Everything())
 	if err != nil {
 		return false, nil, err
@@ -1020,41 +1022,52 @@ func (b *volumeBinder) hasEnoughCapacity(logger klog.Logger, provisioner string,
 
 	sizeInBytes := quantity.Value()
 	for _, capacity := range capacities {
+		/*
+			apiVersion: storage.k8s.io/v1beta1
+			kind: CSIStorageCapacity
+			metadata:
+			  name: fast-ssd-zone-a
+			  namespace: default
+			storageClassName: fast-ssd
+			capacity: 500Gi
+			nodeTopology:
+			  matchLabels:
+			    topology.kubernetes.io/zone: zone-a
+		*/
 		if capacity.StorageClassName == storageClass.Name &&
 			capacitySufficient(capacity, sizeInBytes) &&
 			b.nodeHasAccess(logger, node, capacity) {
-			// Enough capacity found.
 			return true, capacity, nil
 		}
 	}
 
-	// TODO (?): this doesn't give any information about which pools where considered and why
-	// they had to be rejected. Log that above? But that might be a lot of log output...
 	logger.V(4).Info("Node has no accessible CSIStorageCapacity with enough capacity for PVC",
 		"node", klog.KObj(node), "PVC", klog.KObj(claim), "size", sizeInBytes, "storageClass", klog.KObj(storageClass))
 	return false, nil, nil
 }
 
-// to keep backward compatibility
+// capacitySufficient 为兼容旧版本，判断容量是否足够
 func capacitySufficient(capacity *storagev1beta1.CSIStorageCapacity, sizeInBytes int64) bool {
 	limit := volumeLimit(capacity)
 	return limit != nil && limit.Value() >= sizeInBytes
 }
 
+// volumeLimit 获取容量对象中真正可用的容量上限
 func volumeLimit(capacity *storagev1beta1.CSIStorageCapacity) *resource.Quantity {
 	if capacity.MaximumVolumeSize != nil {
-		// Prefer MaximumVolumeSize if available, it is more precise.
+		// 优先使用 MaximumVolumeSize，语义更准确
 		return capacity.MaximumVolumeSize
 	}
 	return capacity.Capacity
 }
 
+// nodeHasAccess 判断节点是否匹配该 CSIStorageCapacity 的拓扑要求
 func (b *volumeBinder) nodeHasAccess(logger klog.Logger, node *v1.Node, capacity *storagev1beta1.CSIStorageCapacity) bool {
 	if capacity.NodeTopology == nil {
-		// Unavailable
+		// 没有拓扑信息，认为不可用
 		return false
 	}
-	// Only matching by label is supported.
+	// 仅支持 label selector 方式匹配
 	selector, err := metav1.LabelSelectorAsSelector(capacity.NodeTopology)
 	if err != nil {
 		logger.Error(err, "Unexpected error converting to a label selector", "nodeTopology", capacity.NodeTopology)
@@ -1063,6 +1076,7 @@ func (b *volumeBinder) nodeHasAccess(logger klog.Logger, node *v1.Node, capacity
 	return selector.Matches(labels.Set(node.Labels))
 }
 
+// byPVCSize 用于按照 PVC 请求存储大小排序
 type byPVCSize []*v1.PersistentVolumeClaim
 
 func (a byPVCSize) Len() int {
@@ -1076,11 +1090,17 @@ func (a byPVCSize) Swap(i, j int) {
 func (a byPVCSize) Less(i, j int) bool {
 	iSize := a[i].Spec.Resources.Requests[v1.ResourceStorage]
 	jSize := a[j].Spec.Resources.Requests[v1.ResourceStorage]
-	// return true if iSize is less than jSize
 	return iSize.Cmp(jSize) == -1
 }
 
-// isCSIMigrationOnForPlugin checks if CSI migration is enabled for a given plugin.
+// isCSIMigrationOnForPlugin 判断某个 in-tree 存储插件是否在集群层面开启了 CSI 迁移（CSI Migration）。
+//
+// CSI 迁移背景：Kubernetes 逐渐将内置的 in-tree 存储插件（如 AWS EBS、GCE PD、Azure Disk 等）
+// 迁移到 out-of-tree 的 CSI 驱动。开启迁移后，in-tree 的 PV/PVC 在调度时会被视为 CSI PV/PVC，
+// 以便使用 CSI 驱动的拓扑、容量等能力。
+//
+// 参数 enableCSIMigrationPortworx 用于控制 Portworx 的迁移开关，因为该插件的迁移需要显式启用。
+// 其他主流插件（AWS EBS、GCE PD、Azure Disk、Cinder）默认视为已开启迁移。
 func isCSIMigrationOnForPlugin(pluginName string, enableCSIMigrationPortworx bool) bool {
 	switch pluginName {
 	case csiplugins.AWSEBSInTreePluginName:
@@ -1097,9 +1117,15 @@ func isCSIMigrationOnForPlugin(pluginName string, enableCSIMigrationPortworx boo
 	return false
 }
 
-// isPluginMigratedToCSIOnNode checks if an in-tree plugin has been migrated to a CSI driver on the node.
+// isPluginMigratedToCSIOnNode 判断某个 in-tree 存储插件是否已经在指定节点上迁移到了 CSI。
+//
+// Kubernetes 通过 CSINode 对象上的 `csi.migrated-plugins` 注解记录该节点上已完成迁移的 in-tree 插件列表。
+// 该注解值为逗号分隔的插件名称。只有当插件同时满足以下条件时，才认为该 PV 在该节点上需要按 CSI 处理：
+//  1. 集群层面开启了该插件的 CSI 迁移（isCSIMigrationOnForPlugin 返回 true）；
+//  2. 当前节点已经完成了该插件的迁移（本函数返回 true）。
 func isPluginMigratedToCSIOnNode(pluginName string, csiNode *storagev1.CSINode) bool {
 	if csiNode == nil {
+		// 没有 CSINode 信息，无法确认迁移状态，保守认为未迁移。
 		return false
 	}
 
@@ -1113,6 +1139,7 @@ func isPluginMigratedToCSIOnNode(pluginName string, csiNode *storagev1.CSINode) 
 	if len(mpa) == 0 {
 		mpaSet = sets.New[string]()
 	} else {
+		// 注解值为逗号分隔的已迁移插件名称列表。
 		tok := strings.Split(mpa, ",")
 		mpaSet = sets.New(tok...)
 	}
@@ -1120,25 +1147,52 @@ func isPluginMigratedToCSIOnNode(pluginName string, csiNode *storagev1.CSINode) 
 	return mpaSet.Has(pluginName)
 }
 
-// tryTranslatePVToCSI will translate the in-tree PV to CSI if it meets the criteria. If not, it returns the unmodified in-tree PV.
+// tryTranslatePVToCSI 尝试在满足 CSI 迁移条件时，将 in-tree PV 转换为 CSI PV。
+//
+// 转换条件（必须同时满足，否则返回原 PV 不变）：
+//  1. PV 本身是可迁移的（translator.IsPVMigratable）。例如 PV 使用 AWS EBS、GCE PD 等 in-tree 插件；
+//  2. 能从 PV spec 中解析出对应的 in-tree 插件名称（GetInTreePluginNameFromSpec）；
+//  3. 集群层面开启了该插件的 CSI 迁移（isCSIMigrationOnForPlugin）；
+//  4. 当前目标节点已经完成了该插件的 CSI 迁移（isPluginMigratedToCSIOnNode）。
+//
+// 为什么需要转换：
+//
+//	当节点已经迁移到 CSI 后，kubelet 不再使用 in-tree 插件挂载卷，而是通过 CSI 驱动。
+//	此时 PV 的节点亲和性（nodeAffinity）也应该按 CSI 驱动对应的拓扑来校验，
+//	而不是按旧的 in-tree 插件拓扑。因此调度器需要在 Filter 阶段将 in-tree PV 翻译成 CSI PV，
+//	确保后续 CheckNodeAffinity 使用的是 CSI 拓扑。
+//
+// 调用位置：
+//   - checkBoundClaims：校验已绑定 PVC 的 PV 与节点亲和性前；
+//   - checkBindings（AssumePodVolumes 后的绑定检查）：校验静态绑定 PV 与节点亲和性前；
+//   - checkBindings 动态供给分支：校验已 provision 出的 PV 与节点亲和性前。
 func (b *volumeBinder) tryTranslatePVToCSI(logger klog.Logger, pv *v1.PersistentVolume, csiNode *storagev1.CSINode) (*v1.PersistentVolume, error) {
+	// 第一步：判断该 PV 是否属于可迁移的 in-tree PV。
+	// 如果 PV 本身就是 CSI PV，或者使用的是未启用迁移的 in-tree 插件，则直接返回原 PV。
 	if !b.translator.IsPVMigratable(pv) {
 		return pv, nil
 	}
 
+	// 第二步：从 PV spec 中识别出对应的 in-tree 插件名称。
+	// 第二个参数传 nil 表示不传入 PVC，仅根据 PV 推断插件名。
 	pluginName, err := b.translator.GetInTreePluginNameFromSpec(pv, nil)
 	if err != nil {
 		return nil, fmt.Errorf("could not get plugin name from pv: %v", err)
 	}
 
+	// 第三步：检查集群层面是否开启了该插件的 CSI 迁移。
 	if !isCSIMigrationOnForPlugin(pluginName, b.enableCSIMigrationPortworx) {
 		return pv, nil
 	}
 
+	// 第四步：检查目标节点是否已将该插件迁移到 CSI。
+	// 节点未迁移时，kubelet 仍使用 in-tree 插件，无需转换 PV。
 	if !isPluginMigratedToCSIOnNode(pluginName, csiNode) {
 		return pv, nil
 	}
 
+	// 第五步：执行 in-tree PV 到 CSI PV 的转换。
+	// 转换后的 transPV 会带有 CSI 驱动名和 CSI 卷句柄，其 nodeAffinity 也对应 CSI 拓扑。
 	transPV, err := b.translator.TranslateInTreePVToCSI(logger, pv)
 	if err != nil {
 		return nil, fmt.Errorf("could not translate pv: %v", err)

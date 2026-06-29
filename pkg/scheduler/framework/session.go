@@ -54,10 +54,17 @@ import (
 )
 
 const (
-	// ClusterTopHyperNode is the common root for all HyperNodes in the snapshot.
-	// During the session open phase, a virtual cluster-level top-tier HyperNode is created in the snapshot, simplifying subsequent scheduling logic.
-	// Its Tier value is set to the maximum existing Tier + 1 among real HyperNodes. This is recalculated every time a session opens.
-	// If no real HyperNodes exist in the cluster, this virtual top-tier HyperNode will still exist with Tier = 1 and will encompass all Nodes in the cluster.
+	/*
+		ClusterTopHyperNode 是快照中所有 HyperNode 的共同根节点。
+		在 session 打开阶段，会在快照中创建一个虚拟的、集群级别的顶层 HyperNode，
+		这会简化后续的调度逻辑。
+
+		它的 Tier 值会被设置为当前真实 HyperNode 中最大的 Tier + 1。
+		这个值会在每次 session 打开时重新计算。
+
+		如果集群中不存在任何真实的 HyperNode，那么这个虚拟的顶层 HyperNode 仍然会存在，
+		此时它的 Tier = 1，并且会包含集群中的所有 Node。
+	*/
 	ClusterTopHyperNode = "<cluster-top-hypernode>"
 )
 

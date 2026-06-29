@@ -51,9 +51,9 @@ type SubJobInfo struct {
 	taskPriorities  map[int32]sets.Set[TaskID]
 
 	AllocatedHyperNode string
-	// NominatedHyperNode is the hyperNode chosen by gangpreempt/gangreclaim
-	// for this subJob. allocate honors it via a per-subJob fast path and
-	// clears it on commit. In-memory only; not persisted across restarts.
+	// NominatedHyperNode 是由 gangpreempt/gangreclaim
+	// 为这个 subJob 选中的 hyperNode。allocate 会通过每个 subJob 的快速路径来尊重它，
+	// 并在 commit 时清除它。只存在于内存中；重启后不会持久化。
 	NominatedHyperNode string
 
 	NetworkTopology *scheduling.NetworkTopologySpec
@@ -91,6 +91,7 @@ func (sji *SubJobInfo) IsHardTopologyMode() (bool, int) {
 		return false, 0
 	}
 
+	//HighestTierAllowed  与hard模式配合使用，表示作业允许跨到哪层HyperNode部署
 	return sji.NetworkTopology.Mode == scheduling.HardNetworkTopologyMode, *sji.NetworkTopology.HighestTierAllowed
 }
 

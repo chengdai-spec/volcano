@@ -40,8 +40,7 @@ func (tracker *InitialEventAsyncHandlerTracker) Done(obj string) {
 	tracker.ObjectSet.Delete(obj)
 }
 
-// HasSynced report if both the parent has synced and all
-// tracked objects in queue have been handled
+// HasSynced 报告父级是否已同步，以及队列中所有被追踪的对象是否都已处理完成
 func (tracker *InitialEventAsyncHandlerTracker) HasSynced() bool {
 	if !tracker.UpstreamHasSynced() {
 		return false

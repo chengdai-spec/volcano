@@ -221,6 +221,7 @@ func (gp *gangPlugin) OnSessionOpen(ssn *framework.Session) {
 	jobStarvingFn := func(obj interface{}) bool {
 		ji := obj.(*api.JobInfo)
 		// In the preemption scenario, the taskMinAvailable configuration is not concerned, only the jobMinAvailable is concerned
+		// 在抢占场景下，不用关心 taskMinAvailable 的配置，只需要关心 jobMinAvailable
 		return ji.IsStarving()
 	}
 	ssn.AddJobStarvingFns(gp.Name(), jobStarvingFn)

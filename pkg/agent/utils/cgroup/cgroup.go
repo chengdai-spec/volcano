@@ -80,6 +80,16 @@ const (
 	DefaultCgroupV1MountPoint string = "/sys/fs/cgroup"
 	DefaultCgroupV2MountPoint string = "/sys/fs/cgroup"
 
+	/*
+		| 特性  	  | `systemd`                     | `cgroupfs` |
+		|------   |-------------------------------------------------------|-----------|
+		| 管理主体 | 由 **systemd** 管理 cgroup 层级                         | 直接由容器运行时通过 cgroupfs 文件系统管理 |
+		| 层级结构 | 与 systemd 的服务（unit）层级一致，方便统一管理服务和 cgroup  | 独立于 systemd，运行时直接在 `/sys/fs/cgroup` 下创建层级 |
+		| 启动方式 | 容器运行时将 cgroup 控制权交给 systemd 进程                | 容器运行时直接操作 cgroup 文件系统 |
+		| 优点    | - 与宿主机服务管理统一(Kubernetes、Docker、systemd 服务共享一套 cgroup 层级)- 更易与现代 Linux 系统兼容（尤其是 cgroup v2） | - 运行时独立管理，系统服务层级不影响容器的 cgroup 层级<br> - 适配更老旧的 Linux 系统（主要 cgroup v1） |
+		| 缺点    | - 依赖宿主机 systemd - 学习成本稍高                        | - 容器运行时与宿主机服务分离，可能出现不同管理者的层级冲突 |
+		| 常见用途 | 新版本 Kubernetes 推荐默认使用（K8s 1.22+，配合 cgroup v2） | 旧版本 Docker/K8s 或无 systemd 环境使用 |
+	*/
 	// Cgroup driver types
 	CgroupDriverSystemd  string = "systemd"
 	CgroupDriverCgroupfs string = "cgroupfs"

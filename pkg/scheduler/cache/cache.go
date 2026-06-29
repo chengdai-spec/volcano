@@ -90,6 +90,7 @@ const (
 )
 
 // defaultIgnoredProvisioners contains provisioners that will be ignored during pod pvc request computation and preemption.
+// 在 Pod 的 PVC 资源请求计算 和 抢占(preemption)过程中，下面这些 provisioner 会被忽略 ===> 本地磁盘路径
 var defaultIgnoredProvisioners = []string{"rancher.io/local-path", "hostpath.csi.k8s.io"}
 
 func init() {
@@ -261,54 +262,105 @@ func NewDefaultBinder(kbclient kubernetes.Interface, record record.EventRecorder
 	}
 }
 
+// defaultEvictor 是一个默认的驱逐器实现。
+// 它依赖 kubeclient 与 apiserver 通信，依赖 recorder 记录 Pod 事件。
 type defaultEvictor struct {
+	// kubeclient 用于调用 Kubernetes API，例如更新 Pod 状态、删除 Pod。
 	kubeclient kubernetes.Interface
-	recorder   record.EventRecorder
+
+	// recorder 用于给 Pod 记录事件，方便用户通过 kubectl describe pod 查看。
+	recorder record.EventRecorder
 }
 
-// Evict will send delete pod request to api server
+// Evict 用于“驱逐”一个 Pod。
+// 注意：这里的驱逐并不是调用 Kubernetes 的 Eviction 子资源，
+// 而是通过“更新 Pod 状态 + 直接删除 Pod”的方式实现。
+//
+// 参数：
+//
+//	p      - 需要被驱逐的 Pod
+//	reason - 驱逐原因，例如 preemption/reclaim 等
+//
+// 返回：
+//
+//	error  - 失败返回错误，成功返回 nil
 func (de *defaultEvictor) Evict(p *v1.Pod, reason string) error {
+	// 打印调试日志，说明当前正在驱逐哪个 Pod，以及驱逐原因。
 	klog.V(3).Infof("Evicting pod %v/%v, because of %v", p.Namespace, p.Name, reason)
 
+	// 生成一段统一的驱逐消息，后续会用于事件与 PodCondition。
 	evictMsg := fmt.Sprintf("Pod is evicted, because of %v", reason)
+
+	// 这里预留了 annotations，可在记录事件时携带额外信息。
 	annotations := map[string]string{}
-	// record that we are evicting the pod
+
+	// 给 Pod 记录一个 Warning 级别的事件。
+	// 这样在 `kubectl describe pod` 时可以看到该 Pod 被驱逐的原因。
+	//
+	// 事件字段大致为：
+	// Type   = Warning
+	// Reason = Evict
+	// Message= Pod is evicted, because of ...
 	de.recorder.AnnotatedEventf(p, annotations, v1.EventTypeWarning, "Evict", evictMsg)
 
+	// 深拷贝一份 Pod，避免直接修改传入对象。
+	// 后面我们会修改 pod.Status，并将其 UpdateStatus 回 apiserver。
 	pod := p.DeepCopy()
+
+	// 构造第一个 PodCondition：
+	// 将 PodReady 置为 False，表示该 Pod 不再 Ready，因为它即将被驱逐。
 	condition := &v1.PodCondition{
 		Type:    v1.PodReady,
 		Status:  v1.ConditionFalse,
 		Reason:  "Evict",
 		Message: evictMsg,
 	}
+
+	// UpdatePodCondition 会尝试把这个 condition 更新到 pod.Status.Conditions 中。
+	// 返回 false 通常表示：
+	// - 条件已经存在且内容没有变化
+	// - 因此无需再次更新
+	//
+	// 这里的处理逻辑是：如果没有发生更新，则直接返回 nil，不再继续后续删除流程。
+	// 这意味着该实现假定“条件已存在”时，就不用重复执行驱逐动作。
 	if !podutil.UpdatePodCondition(&pod.Status, condition) {
 		klog.V(1).Infof("UpdatePodCondition: existed condition, not update")
 		klog.V(1).Infof("%+v", pod.Status.Conditions)
 		return nil
 	}
 
+	// 构造第二个 PodCondition：
+	// 将 DisruptionTarget 置为 True，表示这个 Pod 当前是一个 disruption 的目标。
+	// 这里的 Reason 固定写成 PreemptionByScheduler，说明该实现主要服务于“抢占”场景。
 	condition = &v1.PodCondition{
 		Type:    v1.DisruptionTarget,
 		Status:  v1.ConditionTrue,
 		Reason:  v1.PodReasonPreemptionByScheduler,
 		Message: fmt.Sprintf("%s: preempting to accommodate a higher priority pod", pod.Spec.SchedulerName),
 	}
+
+	// 同样地，如果该 condition 已经存在且无需更新，则直接返回 nil。
 	if !podutil.UpdatePodCondition(&pod.Status, condition) {
 		klog.V(1).Infof("UpdatePodCondition: existed condition, not update")
 		klog.V(1).Infof("%+v", pod.Status.Conditions)
 		return nil
 	}
 
+	// 将修改后的 Pod Status 更新回 apiserver。
+	// 这里更新的是 status 子资源，而不是整个 Pod 对象。
 	if _, err := de.kubeclient.CoreV1().Pods(p.Namespace).UpdateStatus(context.TODO(), pod, metav1.UpdateOptions{}); err != nil {
 		klog.Errorf("Failed to update pod <%v/%v> status: %v", pod.Namespace, pod.Name, err)
 		return err
 	}
+
+	// 真正执行“驱逐”动作：直接删除 Pod。
+	// 删除后，Pod 通常会进入 Terminating，随后由 kubelet 清理容器。
 	if err := de.kubeclient.CoreV1().Pods(p.Namespace).Delete(context.TODO(), p.Name, metav1.DeleteOptions{}); err != nil {
 		klog.Errorf("Failed to evict pod <%v/%v>: %#v", p.Namespace, p.Name, err)
 		return err
 	}
 
+	// 更新状态成功、删除成功，则返回 nil 表示驱逐完成。
 	return nil
 }
 
@@ -572,6 +624,7 @@ func newSchedulerCache(config *rest.Config, schedulerNames []string, defaultQueu
 		resourceSyncTimeout: resourceSyncTimeout,
 	}
 
+	// 只有当 Volcano 调度器启用了分片（Sharding）模式时，才初始化一个 ShardUpdateCoordinator，用来协调/控制分片相关的更新行为
 	if options.ServerOpts.ShardingMode == util.HardShardingMode || options.ServerOpts.ShardingMode == util.SoftShardingMode {
 		sc.shardUpdateCoordinator = NewShardUpdateCoordinator()
 	}

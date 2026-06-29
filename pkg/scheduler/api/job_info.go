@@ -47,15 +47,19 @@ import (
 	"volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 )
 
+// subJobCondition 是子作业条件判断函数类型，用于 checkSubJobCondition 中判断子作业是否满足特定条件
 type subJobCondition func(*SubJobInfo) bool
 
-// DisruptionBudget define job min pod available and max pod unavailable value
+// DisruptionBudget 定义作业的中断预算，包含最小可用 Pod 数和最大不可用 Pod 数
+// 用于控制作业在驱逐/中断场景下的可用性保障
 type DisruptionBudget struct {
-	MinAvailable   string
-	MaxUnavailable string
+	MinAvailable   string // 最小可用 Pod 数量（字符串格式，支持百分比如 "50%" 或绝对值如 "3"）
+	MaxUnavailable string // 最大不可用 Pod 数量（字符串格式，同上）
 }
 
-// NewDisruptionBudget create disruption budget for job
+// NewDisruptionBudget 为作业创建中断预算对象
+// 参数 minAvailable: 最小可用数量字符串
+// 参数 maxUnavailable: 最大不可用数量字符串
 func NewDisruptionBudget(minAvailable, maxUnavailable string) *DisruptionBudget {
 	disruptionBudget := &DisruptionBudget{
 		MinAvailable:   minAvailable,
@@ -64,7 +68,7 @@ func NewDisruptionBudget(minAvailable, maxUnavailable string) *DisruptionBudget 
 	return disruptionBudget
 }
 
-// Clone return a clone of DisruptionBudget
+// Clone 返回 DisruptionBudget 的深拷贝副本
 func (db *DisruptionBudget) Clone() *DisruptionBudget {
 	return &DisruptionBudget{
 		MinAvailable:   db.MinAvailable,
@@ -72,22 +76,24 @@ func (db *DisruptionBudget) Clone() *DisruptionBudget {
 	}
 }
 
-// JobWaitingTime is maximum waiting time that a job could stay Pending in service level agreement
-// when job waits longer than waiting time, it should enqueue at once, and cluster should reserve resources for it
+// JobWaitingTime 是 SLA 等待时间的注解键名
+// 作业在 Pending 状态等待超过此时间后，应立即入队，集群应为其预留资源
 const JobWaitingTime = "sla-waiting-time"
 
-// TaskID is UID type for Task
+// TaskID 是任务 UID 的类型别名
 type TaskID types.UID
 
-// TransactionContext holds all the fields that needed by scheduling transaction
+// TransactionContext 保存调度事务所需的所有字段
+// 每次调度周期（scheduling cycle）中，任务的事务上下文会记录当前调度的中间状态
 type TransactionContext struct {
-	NodeName              string
-	EvictionOccurred      bool
-	JobAllocatedHyperNode string
-	Status                TaskStatus
+	NodeName              string     // 任务被调度到的节点名称
+	EvictionOccurred      bool       // 当前事务中是否发生了驱逐操作
+	JobAllocatedHyperNode string     // 作业已分配的超节点(HyperNode，用于网络拓扑感知调度)
+	Status                TaskStatus // 当前事务中任务的状态
 }
 
-// Clone returns a clone of TransactionContext
+// Clone 返回 TransactionContext 的深拷贝副本
+// 如果上下文为 nil 则返回 nil
 func (ctx *TransactionContext) Clone() *TransactionContext {
 	if ctx == nil {
 		return nil
@@ -96,11 +102,15 @@ func (ctx *TransactionContext) Clone() *TransactionContext {
 	return &clone
 }
 
+// TopologyInfo 记录 NUMA 拓扑感知信息
+// 用于支持 CPU 拓扑感知调度，将资源需求绑定到特定的 NUMA 节点
 type TopologyInfo struct {
-	Policy string
-	ResMap map[int]v1.ResourceList // key: numa ID
+	Policy string                  // 拓扑策略（如 best-effort 或 restricted）
+	ResMap map[int]v1.ResourceList // NUMA 资源映射，key 为 NUMA 节点 ID，value 为该 NUMA 节点上的资源列表
 }
 
+// Clone 返回 TopologyInfo 的深拷贝副本
+// 深拷贝 ResMap 中的每个 ResourceList 以确保修改副本不影响原始对象
 func (info *TopologyInfo) Clone() *TopologyInfo {
 	copyInfo := &TopologyInfo{
 		Policy: info.Policy,
@@ -114,18 +124,19 @@ func (info *TopologyInfo) Clone() *TopologyInfo {
 	return copyInfo
 }
 
-// TaskInfo will have all infos about the task
+// TaskInfo 包含调度器中一个任务（Pod）的所有信息
+// 它是调度器内部对 Pod 的封装，包含资源需求、调度状态、拓扑信息等
 type TaskInfo struct {
-	UID TaskID
-	Job JobID
+	UID TaskID // 任务的唯一标识符(对应 Pod 的 UID)
+	Job JobID  // 任务所属的作业 ID
 
-	Name      string
-	Namespace string
-	TaskRole  string // value of "volcano.sh/task-spec"
+	Name      string // 任务名称(Pod 名称)
+	Namespace string // 任务所在命名空间
+	TaskRole  string // 任务角色，对应 "volcano.sh/task-spec" 注解值，用于区分同一作业中不同角色的任务
 
-	// Resreq is the resource that used when task running.
+	// Resreq 是任务运行时的实际资源需求量
 	Resreq *Resource
-	// InitResreq is the resource that used to launch a task.
+	// InitResreq 是任务启动时的初始资源需求量（InitContainer 可能需要额外资源）
 	InitResreq *Resource
 	// DRAResreq aggregates DRA resource requests per DeviceClass
 	DRAResreq map[string]*DRAResource
@@ -134,32 +145,35 @@ type TaskInfo struct {
 	// ResourceClaimDRAResreq stores per-claim DRA resources for shared-claim deduplication.
 	ResourceClaimDRAResreq map[string]map[string]*DRAResource
 
-	TransactionContext
-	// LastTransaction holds the context of last scheduling transaction
+	TransactionContext // 嵌入当前事务上下文（包含 NodeName、Status 等）
+	// LastTransaction 保存上一次调度事务的上下文，用于记录调度失败原因
 	LastTransaction *TransactionContext
 
-	Priority                    int32
-	VolumeReady                 bool
-	Preemptable                 bool
-	BestEffort                  bool
-	HasRestartableInitContainer bool
-	SchGated                    bool
+	Priority                    int32 // 任务优先级(影响调度和抢占顺序)
+	VolumeReady                 bool  // 卷是否已就绪(用于 Pod 绑定前的检查)
+	Preemptable                 bool  // 任务是否可被抢占(对应 volcano.sh/preemptable 注解)
+	BestEffort                  bool  // 是否为 BestEffort 任务(即无任何 CPU/内存资源请求)
+	HasRestartableInitContainer bool  // Pod 是否包含可重启的 InitContainer(影响资源计算)
+	SchGated                    bool  // Pod 是否被 Kubernetes 调度门控(SchedulingGates)阻塞
 
-	// RevocableZone supports setting volcano.sh/revocable-zone annotation or label for pod/podgroup
-	// we only support empty value or * value for this version and we will support specify revocable zone name for future releases
-	// empty value means workload can not use revocable node
-	// * value means workload can use all the revocable node for during node active revocable time.
+	// RevocableZone 表示任务可使用的可撤销区域
+	// 支持设置 volcano.sh/revocable-zone 注解或标签
+	// 空值表示不能使用可撤销节点，"*" 值表示可以使用所有可撤销节点
 	RevocableZone string
 
-	NumaInfo *TopologyInfo
-	Pod      *v1.Pod
+	NumaInfo *TopologyInfo // NUMA 拓扑信息，用于 NUMA 感知调度
+	Pod      *v1.Pod       // 原始 Kubernetes Pod 对象引用
 
-	// CustomBindErrHandler is a custom callback func called when task bind err.
+	// CustomBindErrHandler 是自定义的绑定错误回调函数
+	// 当任务绑定失败时调用，用于执行自定义的清理或回滚逻辑
 	CustomBindErrHandler func() error `json:"-"`
-	// CustomBindErrHandlerSucceeded indicates whether CustomBindErrHandler is executed successfully.
+	// CustomBindErrHandlerSucceeded 标识自定义绑定错误处理函数是否执行成功
 	CustomBindErrHandlerSucceeded bool
 }
 
+// getJobID 根据 Pod 的注解提取其所属的作业 ID
+// 通过读取 "scheduling.volcano.sh/group-name" 注解来确定 Pod 属于哪个 PodGroup
+// 作业 ID 格式为 "namespace/groupName"
 func getJobID(pod *v1.Pod) JobID {
 	if gn, found := pod.Annotations[v1beta1.KubeGroupNameAnnotationKey]; found && len(gn) != 0 {
 		// Make sure Pod and PodGroup belong to the same namespace.
@@ -170,6 +184,9 @@ func getJobID(pod *v1.Pod) JobID {
 	return ""
 }
 
+// getTaskRole 从 Pod 的注解或标签中提取任务角色（task-spec）
+// 首先检查注解 "volcano.sh/task-spec"，若不存在则检查标签
+// 任务角色用于区分同一作业中不同类型的任务（如 driver/worker）
 func getTaskRole(pod *v1.Pod) string {
 	if pod == nil {
 		return ""
@@ -185,9 +202,13 @@ func getTaskRole(pod *v1.Pod) string {
 	return ""
 }
 
+// TaskPriorityAnnotation 是任务优先级注解键
+// 可通过此注解为单个任务设置独立于 Pod 优先级的调度优先级
 const TaskPriorityAnnotation = "volcano.sh/task-priority"
 
-// NewTaskInfo creates new taskInfo object for a Pod
+// NewTaskInfo 根据 Pod 创建新的 TaskInfo 对象
+// 该函数是调度器将 Kubernetes Pod 转换为内部 Task 模型的核心入口
+// 会提取 Pod 的资源需求、优先级、抢占属性、拓扑信息、调度门控状态等
 func NewTaskInfo(pod *v1.Pod) *TaskInfo {
 	initResReq := GetPodResourceRequest(pod)
 	resReq := initResReq
@@ -223,10 +244,13 @@ func NewTaskInfo(pod *v1.Pod) *TaskInfo {
 		},
 	}
 
+	// 从 Pod 的 PriorityClass 获取优先级，若未设置则保持默认值 1
 	if pod.Spec.Priority != nil {
 		ti.Priority = *pod.Spec.Priority
 	}
 
+	// 如果 Pod 设置了 "volcano.sh/task-priority" 注解，使用该注解值覆盖优先级
+	// 这允许在同一 PriorityClass 下为不同任务设置不同的调度优先级
 	if taskPriority, ok := pod.Annotations[TaskPriorityAnnotation]; ok {
 		if priority, err := strconv.ParseInt(taskPriority, 10, 32); err == nil {
 			ti.Priority = int32(priority)
@@ -236,24 +260,26 @@ func NewTaskInfo(pod *v1.Pod) *TaskInfo {
 	return ti
 }
 
-// GetTransactionContext get transaction context of a task
+// GetTransactionContext 获取任务当前的事务上下文
 func (ti *TaskInfo) GetTransactionContext() TransactionContext {
 	return ti.TransactionContext
 }
 
-// GenerateLastTxContext generate and set context of last transaction for a task
+// GenerateLastTxContext 生成并设置任务上一次调度事务的上下文
+// 在新调度周期开始前调用，将当前事务上下文保存为历史上下文
 func (ti *TaskInfo) GenerateLastTxContext() {
 	ctx := ti.GetTransactionContext()
 	ti.LastTransaction = &ctx
 }
 
-// ClearLastTxContext clear context of last transaction for a task
+// ClearLastTxContext 清除任务的上一次调度事务上下文
 func (ti *TaskInfo) ClearLastTxContext() {
 	ti.LastTransaction = nil
 }
 
-// Return if the pod of a task is scheduling gated by checking if length of sch gates is zero
-// When the Pod is not yet created or sch gates field not set, return false
+// calSchedulingGated 判断 Pod 是否被 Kubernetes 调度门控（SchedulingGates）阻塞
+// 只有当 PodSchedulingReadiness 特性门控启用时才检查
+// 如果 Pod 存在 SchedulingGates 且不为空，则认为被门控
 func calSchedulingGated(pod *v1.Pod) bool {
 	// Only enable if features.PodSchedulingReadiness feature gate is enabled
 	if utilfeature.DefaultFeatureGate.Enabled(features.PodSchedulingReadiness) {
@@ -262,6 +288,9 @@ func calSchedulingGated(pod *v1.Pod) bool {
 	return false
 }
 
+// SetPodResourceDecision 将 NUMA 资源分配决策写回 Pod 的注解
+// 用于拓扑感知调度，将调度器决定的 NUMA 节点资源映射写入 Pod 的 annotation
+// 这样节点上的 agent 可以据此执行绑核操作
 func (ti *TaskInfo) SetPodResourceDecision() error {
 	if ti.NumaInfo == nil || len(ti.NumaInfo.ResMap) == 0 {
 		return nil
@@ -281,11 +310,13 @@ func (ti *TaskInfo) SetPodResourceDecision() error {
 	return nil
 }
 
+// UnsetPodResourceDecision 删除 Pod 上的拓扑资源分配决策注解
 func (ti *TaskInfo) UnsetPodResourceDecision() {
 	delete(ti.Pod.Annotations, topologyDecisionAnnotation)
 }
 
-// Clone is used for cloning a task
+// Clone 返回 TaskInfo 的深拷贝副本
+// 克隆所有字段，包括资源需求的深拷贝、NUMA 信息的深拷贝和事务上下文的深拷贝
 func (ti *TaskInfo) Clone() *TaskInfo {
 	res := &TaskInfo{
 		UID:                         ti.UID,
@@ -327,7 +358,9 @@ func (ti *TaskInfo) Clone() *TaskInfo {
 	return res
 }
 
-// hasRestartableInitContainer returns whether pod has restartable container.
+// hasRestartableInitContainer 判断 Pod 是否包含可重启的 InitContainer
+// 可重启的 InitContainer（RestartPolicy=Always）在 Pod 整个生命周期内运行
+// 其资源需求需要一直被计算，这与普通 InitContainer 不同
 func hasRestartableInitContainer(pod *v1.Pod) bool {
 	for _, c := range pod.Spec.InitContainers {
 		if c.RestartPolicy != nil && *c.RestartPolicy == v1.ContainerRestartPolicyAlways {
@@ -337,7 +370,7 @@ func hasRestartableInitContainer(pod *v1.Pod) bool {
 	return false
 }
 
-// String returns the taskInfo details in a string
+// String 返回 TaskInfo 的可读字符串表示，用于日志输出
 func (ti TaskInfo) String() string {
 	res := fmt.Sprintf("Task (%v:%v/%v): taskSpec %s, job %v, nodeName %v, status %v, pri %v, "+
 		"resreq %v, preemptable %v, revocableZone %v",
@@ -351,32 +384,36 @@ func (ti TaskInfo) String() string {
 	return res
 }
 
-// JobID is the type of JobInfo's ID.
+// JobID 是作业 ID 的类型别名
 type JobID types.UID
 
+// TasksMap 是任务映射表类型，key 为 TaskID，value 为 TaskInfo 指针
 type TasksMap map[TaskID]*TaskInfo
 
-// NodeResourceMap stores resource in a node
+// NodeResourceMap 存储节点上的资源映射，key 为节点名称
+// 用于记录多个节点的资源信息
 type NodeResourceMap map[string]*Resource
 
-// JobInfo will have all info of a Job
+// JobInfo 包含一个作业（PodGroup）的所有信息
+// 它是 Volcano 调度器中对批量作业的完整抽象，包含了作业元数据、任务集合、
+// 资源分配状态、调度约束等全部信息
 type JobInfo struct {
-	UID   JobID
-	PgUID types.UID
+	UID   JobID     // 作业的唯一标识符
+	PgUID types.UID // 对应 PodGroup 的 UID
 
-	Name      string
-	Namespace string
+	Name      string // 作业名称
+	Namespace string // 作业所在命名空间
 
-	Queue QueueID
+	Queue QueueID // 作业所属的队列 ID
 
-	Priority int32
+	Priority int32 // 作业优先级
 
-	MinAvailable int32
+	MinAvailable int32 // 作业最小可用成员数（Gang Scheduling 的核心参数）
 
-	WaitingTime *time.Duration
+	WaitingTime *time.Duration // SLA 等待时间，超过此时间后作业应被优先调度
 
-	JobFitErrors   string
-	NodesFitErrors map[TaskID]*FitErrors
+	JobFitErrors   string                // 作业级别的调度失败原因描述
+	NodesFitErrors map[TaskID]*FitErrors // 各任务在各节点上的调度失败详情
 
 	AllocatedHyperNode string
 	NetworkTopology    *scheduling.NetworkTopologySpec
@@ -385,30 +422,32 @@ type JobInfo struct {
 	MinSubJobs         map[SubJobGID]int32 // key is name of "PodGroup.Spec.SubGroupPolicy", value is minSubGroups
 
 	// All tasks of the Job.
-	TaskStatusIndex       map[TaskStatus]TasksMap
-	Tasks                 TasksMap
-	TaskMinAvailable      map[string]int32 // key is value of "volcano.sh/task-spec", value is number
-	TaskMinAvailableTotal int32
+	TaskStatusIndex       map[TaskStatus]TasksMap // 按状态索引的任务映射，用于快速查询某状态下的所有任务
+	Tasks                 TasksMap                // 所有任务的映射，key 为 TaskID
+	TaskMinAvailable      map[string]int32        // 各角色的最小可用任务数，key 为 "volcano.sh/task-spec" 的值
+	TaskMinAvailableTotal int32                   // 所有角色的最小可用任务数之和
 
-	Allocated    *Resource
-	TotalRequest *Resource
+	Allocated    *Resource // 已分配的资源总量(包含 Bound/Binding/Running/Allocated 状态的任务资源)
+	TotalRequest *Resource // 所有任务的总资源需求量
 
-	CreationTimestamp metav1.Time
-	PodGroup          *PodGroup
+	CreationTimestamp metav1.Time // 作业创建时间
+	PodGroup          *PodGroup   // 关联的 PodGroup 对象引用
 
-	ScheduleStartTimestamp metav1.Time
+	ScheduleStartTimestamp metav1.Time // 调度开始时间戳
 
-	Preemptable bool
+	Preemptable bool // 作业是否可被抢占
 
-	// RevocableZone support set volcano.sh/revocable-zone annotation or label for pod/podgroup
-	// we only support empty value or * value for this version and we will support specify revocable zone name for future release
-	// empty value means workload can not use revocable node
-	// * value means workload can use all the revocable node for during node active revocable time.
+	// RevocableZone 表示作业可使用的可撤销区域
+	// 空值表示不能使用可撤销节点，"*" 表示可使用所有可撤销节点
+	// 可撤销节点是指在特定时间段内可被回收的节点资源
 	RevocableZone string
-	Budget        *DisruptionBudget
+	Budget        *DisruptionBudget // 中断预算，控制作业在驱逐场景下的可用性保障
 }
 
-// NewJobInfo creates a new jobInfo for set of tasks
+// NewJobInfo 创建新的 JobInfo 对象
+// uid: 作业唯一标识符
+// tasks: 可选的初始任务列表
+// 初始化所有内部数据结构（映射、索引等），并将给定任务添加到作业中
 func NewJobInfo(uid JobID, tasks ...*TaskInfo) *JobInfo {
 	job := &JobInfo{
 		UID:              uid,
@@ -431,6 +470,8 @@ func NewJobInfo(uid JobID, tasks ...*TaskInfo) *JobInfo {
 	return job
 }
 
+// UnsetPodGroup 从作业中移除 PodGroup 信息
+// 清空 SubJobs 并重新将所有任务分配到默认子作业
 func cloneNetworkTopology(spec *scheduling.NetworkTopologySpec) *scheduling.NetworkTopologySpec {
 	if spec == nil {
 		return nil
@@ -449,7 +490,13 @@ func (ji *JobInfo) UnsetPodGroup() {
 	}
 }
 
-// SetPodGroup sets podGroup details to a job
+// SetPodGroup 设置作业的 PodGroup 信息
+// 这是从 PodGroup CRD 同步信息到 JobInfo 的核心方法，会提取并设置：
+// 1. 作业名称、命名空间、最小成员数、队列
+// 2. SLA 等待时间（从注解解析）
+// 3. 抢占属性、可撤销区域、中断预算
+// 4. 各角色的最小成员信息（TaskMinAvailable）
+// 5. 如果 SubGroupPolicy 变化，重新构建子作业关系
 func (ji *JobInfo) SetPodGroup(pg *PodGroup) {
 	ji.Name = pg.Name
 	ji.Namespace = pg.Namespace
@@ -457,6 +504,7 @@ func (ji *JobInfo) SetPodGroup(pg *PodGroup) {
 	ji.Queue = QueueID(pg.Spec.Queue)
 	ji.CreationTimestamp = pg.GetCreationTimestamp()
 
+	// 尝试从注解中解析 SLA 等待时间，优先使用 v1beta1.JobWaitingTime 键
 	var err error
 	ji.WaitingTime, err = ji.extractWaitingTime(pg, v1beta1.JobWaitingTime)
 	if err != nil {
@@ -464,6 +512,7 @@ func (ji *JobInfo) SetPodGroup(pg *PodGroup) {
 			pg.Namespace, pg.Name, err.Error())
 		ji.WaitingTime = nil
 	}
+	// 如果 v1beta1 键解析失败，回退到 JobWaitingTime 键（"sla-waiting-time"）
 	if ji.WaitingTime == nil {
 		ji.WaitingTime, err = ji.extractWaitingTime(pg, JobWaitingTime)
 		if err != nil {
@@ -473,10 +522,12 @@ func (ji *JobInfo) SetPodGroup(pg *PodGroup) {
 		}
 	}
 
+	// 解析抢占属性、可撤销区域和中断预算
 	ji.Preemptable = ji.extractPreemptable(pg)
 	ji.RevocableZone = ji.extractRevocableZone(pg)
 	ji.Budget = ji.extractBudget(pg)
 
+	// 解析各角色的最小成员信息
 	ji.ParseMinMemberInfo(pg)
 
 	oldPG := ji.PodGroup
@@ -484,6 +535,7 @@ func (ji *JobInfo) SetPodGroup(pg *PodGroup) {
 	ji.PodGroup = pg
 	ji.NetworkTopology = cloneNetworkTopology(pg.Spec.NetworkTopology)
 
+	// 如果 SubGroupPolicy 发生变化，需要重建子作业映射关系
 	if oldPG == nil || !equality.Semantic.DeepEqual(oldPG.Spec.SubGroupPolicy, pg.Spec.SubGroupPolicy) {
 		clear(ji.SubJobs)
 		for _, task := range ji.Tasks {
@@ -501,8 +553,9 @@ func (ji *JobInfo) SetPodGroup(pg *PodGroup) {
 	}
 }
 
-// extractWaitingTime reads sla waiting time for job from podgroup annotations
-// TODO: should also read from given field in volcano job spec
+// extractWaitingTime 从 PodGroup 注解中读取 SLA 等待时间
+// 参数 waitingTimeKey: 注解键名（支持 v1beta1.JobWaitingTime 和 JobWaitingTime）
+// 返回解析后的等待时间 Duration 和可能的错误
 func (ji *JobInfo) extractWaitingTime(pg *PodGroup, waitingTimeKey string) (*time.Duration, error) {
 	if _, exist := pg.Annotations[waitingTimeKey]; !exist {
 		return nil, nil
@@ -520,7 +573,9 @@ func (ji *JobInfo) extractWaitingTime(pg *PodGroup, waitingTimeKey string) (*tim
 	return &jobWaitingTime, nil
 }
 
-// extractPreemptable return volcano.sh/preemptable value for job
+// extractPreemptable 从 PodGroup 的注解或标签中提取 volcano.sh/preemptable 值
+// 优先检查注解，若不存在则检查标签
+// 返回 true 表示该作业可被抢占
 func (ji *JobInfo) extractPreemptable(pg *PodGroup) bool {
 	// check annotation first
 	if len(pg.Annotations) > 0 {
@@ -534,7 +589,7 @@ func (ji *JobInfo) extractPreemptable(pg *PodGroup) bool {
 		}
 	}
 
-	// it annotation does not exit, check label
+	// 若注解不存在，则检查标签
 	if len(pg.Labels) > 0 {
 		if value, found := pg.Labels[v1beta1.PodPreemptable]; found {
 			b, err := strconv.ParseBool(value)
@@ -549,7 +604,10 @@ func (ji *JobInfo) extractPreemptable(pg *PodGroup) bool {
 	return false
 }
 
-// extractRevocableZone return volcano.sh/revocable-zone value for pod/podgroup
+// extractRevocableZone 从 PodGroup 注解中提取可撤销区域信息
+// 支持两种注解方式：
+// 1. volcano.sh/revocable-zone: 直接设置可撤销区域（仅支持 "*" 值）
+// 2. volcano.sh/preemptable: 若为 true，等价于 revocable-zone="*"
 func (ji *JobInfo) extractRevocableZone(pg *PodGroup) string {
 	// check annotation first
 	if len(pg.Annotations) > 0 {
@@ -570,7 +628,8 @@ func (ji *JobInfo) extractRevocableZone(pg *PodGroup) string {
 	return ""
 }
 
-// extractBudget return budget value for job
+// extractBudget 从 PodGroup 注解中提取中断预算信息
+// 支持 volcano.sh/jdb-min-available 和 volcano.sh/jdb-max-unavailable 两种注解
 func (ji *JobInfo) extractBudget(pg *PodGroup) *DisruptionBudget {
 	if len(pg.Annotations) > 0 {
 		if value, found := pg.Annotations[v1beta1.JDBMinAvailable]; found {
@@ -583,9 +642,10 @@ func (ji *JobInfo) extractBudget(pg *PodGroup) *DisruptionBudget {
 	return NewDisruptionBudget("", "")
 }
 
-// ParseMinMemberInfo set the information about job's min member
-// 1. set number of each role to TaskMinAvailable
-// 2. calculate sum of all roles' min members and set to TaskMinAvailableTotal
+// ParseMinMemberInfo 设置作业的最小成员信息
+// 1. 将 PodGroup.Spec.MinTaskMember 中的各角色最小成员数写入 TaskMinAvailable
+// 2. 计算所有角色的最小成员数之和并写入 TaskMinAvailableTotal
+// 这些信息用于 Gang Scheduling 中按角色维度的最小可用性检查
 func (ji *JobInfo) ParseMinMemberInfo(pg *PodGroup) {
 	taskMinAvailableTotal := int32(0)
 	clear(ji.TaskMinAvailable)
@@ -596,7 +656,8 @@ func (ji *JobInfo) ParseMinMemberInfo(pg *PodGroup) {
 	ji.TaskMinAvailableTotal = taskMinAvailableTotal
 }
 
-// GetMinResources return the min resources of podgroup.
+// GetMinResources 返回 PodGroup 中定义的最小资源需求
+// 如果未设置 MinResources，返回空资源对象
 func (ji *JobInfo) GetMinResources() *Resource {
 	if ji.PodGroup.Spec.MinResources == nil {
 		return EmptyResource()
@@ -605,16 +666,19 @@ func (ji *JobInfo) GetMinResources() *Resource {
 	return NewResource(*ji.PodGroup.Spec.MinResources)
 }
 
-// Get the total resources of tasks whose pod is scheduling gated
-// By definition, if a pod is scheduling gated, it's status is Pending
-// Note: Tasks that are only Volcano scheduling gated (scheduling.volcano.sh/queue-allocation-gate)
-// are excluded from this calculation, as they should be counted in inqueue resources.
+// GetSchGatedPodResources 获取被 Kubernetes 调度门控阻塞的 Pod 的资源总量
+// 注意：仅被 Volcano 调度门控（queue-allocation-gate）阻塞的任务不计入此计算
+// 因为这些任务应被计入 inqueue 资源
 func (ji *JobInfo) GetSchGatedPodResources() *Resource {
 	res := EmptyResource()
 	for _, task := range ji.Tasks {
 		if task.SchGated {
 			// Exclude tasks that are only Volcano scheduling gated
 			// These should be counted in inqueue resources, not deducted
+			/*
+				排除那些仅受 Volcano 调度门控限制的任务
+				这些任务应该计入 inqueue 资源，而不是被扣减
+			*/
 			if HasOnlyVolcanoSchedulingGate(task.Pod) {
 				continue
 			}
@@ -624,10 +688,10 @@ func (ji *JobInfo) GetSchGatedPodResources() *Resource {
 	return res
 }
 
-// DeductSchGatedResources deduct resources of scheduling gated pod from Resource res;
-// If resource is less than gated resources, return zero;
-// Note: The purpose of this functionis to deduct the resources of scheduling gated tasks
-// in a job when calculating inqueued resources so that it will not block other jobs from being inqueued.
+// DeductSchGatedResources 从给定资源中扣除被调度门控阻塞的 Pod 的资源
+// 如果资源量不足以扣除，返回零值而非负数
+// 用途：在计算 inqueue 资源时，需要扣除调度门控任务的资源，
+// 以避免这些未真正调度的任务阻塞其他作业的入队
 func (ji *JobInfo) DeductSchGatedResources(res *Resource) *Resource {
 	schGatedResource := ji.GetSchGatedPodResources()
 	// Most jobs do not have any scheduling gated tasks, hence we add this short cut
@@ -650,7 +714,8 @@ func (ji *JobInfo) DeductSchGatedResources(res *Resource) *Resource {
 	return result
 }
 
-// GetElasticResources returns those partly resources in allocated which are more than its minResource
+// GetElasticResources 返回作业的弹性资源（即已分配资源中超过最小资源需求的部分）
+// 这些资源可以被回收用于其他作业
 func (ji *JobInfo) GetElasticResources() *Resource {
 	if ji.Allocated == nil {
 		return EmptyResource()
@@ -661,6 +726,8 @@ func (ji *JobInfo) GetElasticResources() *Resource {
 	return elastic
 }
 
+// addTaskIndex 将任务添加到状态索引中
+// 相同状态的任务会被分组到同一个 TasksMap 中，便于按状态快速查询
 func (ji *JobInfo) addTaskIndex(ti *TaskInfo) {
 	if _, found := ji.TaskStatusIndex[ti.Status]; !found {
 		ji.TaskStatusIndex[ti.Status] = TasksMap{}
@@ -668,7 +735,8 @@ func (ji *JobInfo) addTaskIndex(ti *TaskInfo) {
 	ji.TaskStatusIndex[ti.Status][ti.UID] = ti
 }
 
-// AddTaskInfo is used to add a task to a job
+// AddTaskInfo 将任务添加到作业中
+// 同时更新：任务映射表、状态索引、总资源需求、已分配资源、子作业关系
 func (ji *JobInfo) AddTaskInfo(ti *TaskInfo) {
 	ji.Tasks[ti.UID] = ti
 	ji.addTaskIndex(ti)
@@ -679,7 +747,9 @@ func (ji *JobInfo) AddTaskInfo(ti *TaskInfo) {
 	ji.addTaskToSubJob(ti)
 }
 
-// UpdateTaskStatus is used to update task's status in a job.
+// UpdateTaskStatus 更新作业中任务的状态
+// 先删除旧状态的任务，再以新状态重新添加
+// 这保证了任务状态索引的一致性
 func (ji *JobInfo) UpdateTaskStatus(task *TaskInfo, status TaskStatus) {
 	// First remove the task (if exist) from the task list.
 	if _, found := ji.Tasks[task.UID]; found {
@@ -691,6 +761,8 @@ func (ji *JobInfo) UpdateTaskStatus(task *TaskInfo, status TaskStatus) {
 	ji.AddTaskInfo(task)
 }
 
+// deleteTaskIndex 从状态索引中删除任务
+// 如果该状态下已无其他任务，则移除整个状态索引项
 func (ji *JobInfo) deleteTaskIndex(ti *TaskInfo) {
 	if tasks, found := ji.TaskStatusIndex[ti.Status]; found {
 		delete(tasks, ti.UID)
@@ -701,7 +773,9 @@ func (ji *JobInfo) deleteTaskIndex(ti *TaskInfo) {
 	}
 }
 
-// DeleteTaskInfo is used to delete a task from a job
+// DeleteTaskInfo 从作业中删除任务
+// 同时更新：总资源需求、已分配资源、任务映射表、状态索引、子作业关系
+// 如果任务不存在，仅输出警告日志
 func (ji *JobInfo) DeleteTaskInfo(ti *TaskInfo) {
 	if task, found := ji.Tasks[ti.UID]; found {
 		ji.TotalRequest.Sub(task.Resreq)
@@ -717,7 +791,9 @@ func (ji *JobInfo) DeleteTaskInfo(ti *TaskInfo) {
 	klog.Warningf("failed to find task <%v/%v> in job <%v/%v>", ti.Namespace, ti.Name, ji.Namespace, ji.Name)
 }
 
-// Clone is used to clone a jobInfo object
+// Clone 返回 JobInfo 的深拷贝副本
+// 克隆所有字段，包括 PodGroup、资源、任务列表、子作业等
+// 注意：NodesFitErrors 会被初始化为空映射，因为调度错误信息不需要在克隆中保留
 func (ji *JobInfo) Clone() *JobInfo {
 	info := &JobInfo{
 		UID:       ji.UID,
@@ -770,7 +846,7 @@ func (ji *JobInfo) Clone() *JobInfo {
 	return info
 }
 
-// String returns a jobInfo object in string format
+// String 返回 JobInfo 的可读字符串表示，用于日志输出
 func (ji JobInfo) String() string {
 	res := ""
 
@@ -784,8 +860,9 @@ func (ji JobInfo) String() string {
 		ji.UID, ji.Namespace, ji.Queue, ji.Name, ji.MinAvailable, ji.PodGroup, ji.Preemptable, ji.RevocableZone, ji.Budget.MinAvailable, ji.Budget.MaxUnavailable) + res
 }
 
-// FitError returns detailed information on why a job's task failed to fit on
-// each available node
+// FitError 返回作业任务调度失败的详细信息
+// 包括：各状态的任务统计、PodGroup 就绪状态、Pending 任务的详细原因
+// 以及原始失败原因（如入队失败或首个 Pod 的谓词失败信息）
 func (ji *JobInfo) FitError() string {
 	sortReasonsHistogram := func(reasons map[string]int) []string {
 		reasonStrings := []string{}
@@ -835,15 +912,19 @@ func (ji *JobInfo) FitError() string {
 	return reasonMsg
 }
 
-// TaskSchedulingReason get detailed reason and message of the given task
-// It returns detailed reason and message for tasks based on last scheduling transaction.
+// TaskSchedulingReason 获取指定任务的详细调度原因和消息
+// 基于上一次调度事务的上下文，返回任务无法调度的具体原因
+// 返回值：
+//   - reason: 标准化的原因字符串（如 PodReasonSchedulable、PodReasonUnschedulable）
+//   - msg: 详细的原因描述信息
+//   - nominatedNodeName: 建议节点名称（仅在 Pipelined 且发生驱逐时有效）
 func (ji *JobInfo) TaskSchedulingReason(tid TaskID) (reason, msg, nominatedNodeName string) {
 	taskInfo, exists := ji.Tasks[tid]
 	if !exists {
 		return "", "", ""
 	}
 
-	// Get detailed scheduling reason based on LastTransaction
+	// 优先使用上一次事务的上下文（记录了最近一次调度尝试的结果）
 	ctx := taskInfo.GetTransactionContext()
 	if taskInfo.LastTransaction != nil {
 		ctx = *taskInfo.LastTransaction
@@ -852,28 +933,33 @@ func (ji *JobInfo) TaskSchedulingReason(tid TaskID) (reason, msg, nominatedNodeN
 	msg = ji.JobFitErrors
 	switch status := ctx.Status; status {
 	case Allocated:
-		// Pod is schedulable
+		// 任务可调度，但需要等待 minAvailable 满足后才能绑定
 		msg = fmt.Sprintf("Pod %s/%s can possibly be assigned to %s, once minAvailable is satisfied", taskInfo.Namespace, taskInfo.Name, ctx.NodeName)
 		return PodReasonSchedulable, msg, ""
 	case Pipelined:
+		// 任务可调度但需等待资源释放（已被其他任务占用），且 minAvailable 需满足
 		msg = fmt.Sprintf("Pod %s/%s can possibly be assigned to %s, once resource is released and minAvailable is satisfied", taskInfo.Namespace, taskInfo.Name, ctx.NodeName)
 		if ctx.EvictionOccurred {
+			// 如果发生了驱逐，则将驱逐目标节点设为建议节点
 			nominatedNodeName = ctx.NodeName
 		}
 		return PodReasonUnschedulable, msg, nominatedNodeName
 	case Pending:
 		if fe := ji.NodesFitErrors[tid]; fe != nil {
-			// Pod is unschedulable
+			// 任务在所有节点上都调度失败（不可调度）
 			return PodReasonUnschedulable, fe.Error(), ""
 		}
-		// Pod is not scheduled yet, keep UNSCHEDULABLE as the reason to support cluster autoscaler
+		// 任务尚未被调度尝试，标记为不可调度以支持集群自动扩缩容
 		return PodReasonUnschedulable, msg, ""
 	default:
+		// 其他状态直接返回状态字符串
 		return status.String(), msg, ""
 	}
 }
 
-// ReadyTaskNum returns the number of tasks that are ready or that is best-effort.
+// ReadyTaskNum 返回就绪任务的数量
+// 就绪任务包括：Bound（已绑定）、Binding（绑定中）、Running（运行中）、
+// Allocated（已分配）、Succeeded（已成功）状态的任务
 func (ji *JobInfo) ReadyTaskNum() int32 {
 	occupied := 0
 	occupied += len(ji.TaskStatusIndex[Bound])
@@ -885,11 +971,14 @@ func (ji *JobInfo) ReadyTaskNum() int32 {
 	return int32(occupied)
 }
 
-// WaitingTaskNum returns the number of tasks that are pipelined.
+// WaitingTaskNum 返回等待中（Pipelined）的任务数量
+// Pipelined 状态表示任务已找到候选节点但需等待资源释放
 func (ji *JobInfo) WaitingTaskNum() int32 {
 	return int32(len(ji.TaskStatusIndex[Pipelined]))
 }
 
+// PendingBestEffortTaskNum 返回 Pending 状态中的 BestEffort 任务数量
+// BestEffort 任务不请求任何 CPU/内存资源，总是被视为可用
 func (ji *JobInfo) PendingBestEffortTaskNum() int32 {
 	count := 0
 	for _, task := range ji.TaskStatusIndex[Pending] {
@@ -900,6 +989,8 @@ func (ji *JobInfo) PendingBestEffortTaskNum() int32 {
 	return int32(count)
 }
 
+// AllocatedTaskNum 返回已分配状态的任务数量
+// 已分配状态包括：Bound、Binding、Running、Allocated
 func (ji *JobInfo) AllocatedTaskNum() int32 {
 	count := 0
 	for status, tasks := range ji.TaskStatusIndex {
@@ -910,7 +1001,8 @@ func (ji *JobInfo) AllocatedTaskNum() int32 {
 	return int32(count)
 }
 
-// FitFailedRoles returns the job roles' failed fit records
+// FitFailedRoles 返回指定子作业中调度失败的任务角色集合
+// 用于判断某角色的任务是否存在调度失败记录
 func (ji *JobInfo) FitFailedRoles(subJob SubJobID) map[string]struct{} {
 	failedRoles := map[string]struct{}{}
 	for tid := range ji.NodesFitErrors {
@@ -923,7 +1015,9 @@ func (ji *JobInfo) FitFailedRoles(subJob SubJobID) map[string]struct{} {
 	return failedRoles
 }
 
-// TaskHasFitErrors checks if the task has fit errors and can continue try predicating
+// TaskHasFitErrors 检查任务是否有调度失败的记录
+// 如果任务未设置 task-spec（TaskRole），则不使用缓存，返回 false
+// 否则检查该任务角色是否在子作业的失败记录中
 func (ji *JobInfo) TaskHasFitErrors(subJob SubJobID, task *TaskInfo) bool {
 	// if the task didn't set the spec key, should not use the cache
 	if len(task.TaskRole) == 0 {
@@ -934,32 +1028,28 @@ func (ji *JobInfo) TaskHasFitErrors(subJob SubJobID, task *TaskInfo) bool {
 	return exist
 }
 
-// NeedContinueAllocating checks whether it can continue on allocating for current job
-// when its one pod predicated failed, there are two cases to continue:
-//  1. job's total allocatable number meet its minAvailable(each task role has no independent minMember setting):
-//     because there are cases that some of the pods are not allocatable, but other pods are allocatable and
-//     the number of this kind pods can meet the gang-scheduling
-//  2. each task's allocable number meet its independent minAvailable
-//     this is for the case that each task role has its own independent minMember.
-//     eg, current role's pod has a failed predicating result but its allocated number has meet its minMember,
-//     the other roles' pods which have no failed predicating results can continue on
+// NeedContinueAllocating 检查当前作业在某个 Pod 调度失败后是否可以继续分配
+// 有两种情况可以继续：
+//  1. 作业总的可分配数量满足 minAvailable（无独立角色 minMember 设置时）
+//     因为某些 Pod 不可调度，但其他 Pod 可调度且数量满足 Gang Scheduling 要求
+//  2. 每个角色的可分配数量满足其独立的 minAvailable
+//     当某角色调度失败但其已分配数量已满足 minMember 时，其他角色可继续
 //
-// performance analysis:
-//
-//	As the failed predicating role has been pre-checked when it was popped from queue,
-//	this function will only be called at most as the number of roles in this job.
+// 性能分析：由于失败角色在出队时已预检，此函数最多被调用次数等于作业中的角色数
 func (ji *JobInfo) NeedContinueAllocating(subJobID SubJobID) bool {
-	// Ensures all tasks must be running; if any pod allocation fails, further execution stops
+	// 如果作业的 MinAvailable 等于任务总数，则所有任务都必须运行，任何一个失败都不能继续
 	if int(ji.MinAvailable) == len(ji.Tasks) {
 		return false
 	}
+	// 对子作业做同样的检查：如果子任务的 MinAvailable 大于等于子任务总数，不能继续
 	if subJob, found := ji.SubJobs[subJobID]; found {
 		if int(subJob.MinAvailable) >= len(subJob.Tasks) {
 			return false
 		}
 	}
 
-	// todo: job contains subJob policy does not supports the strategies below
+	// 包含子作业策略的作业暂不支持以下优化逻辑，直接返回 true
+	// todo: 包含子作业策略的作业不支持以下策略
 	if ji.ContainsSubJobPolicy() {
 		return true
 	}
@@ -970,7 +1060,8 @@ func (ji *JobInfo) NeedContinueAllocating(subJobID SubJobID) bool {
 	for _, task := range ji.TaskStatusIndex[Pending] {
 		pending[task.TaskRole]++
 	}
-	// 1. don't consider each role's min, just consider total allocatable number vs job's MinAvailable
+	// 情况1：不考虑每个角色的最小值，仅比较总可分配数与作业的 MinAvailable
+	// 当 MinAvailable < TaskMinAvailableTotal 时，使用此逻辑
 	if ji.MinAvailable < ji.TaskMinAvailableTotal {
 		left := int32(0)
 		for role, cnt := range pending {
@@ -981,7 +1072,8 @@ func (ji *JobInfo) NeedContinueAllocating(subJobID SubJobID) bool {
 		return ji.ReadyTaskNum()+left >= ji.MinAvailable
 	}
 
-	// 2. if each task role has its independent minMember, check it
+	// 情况2：每个角色有独立的 minMember，逐个检查
+	// 如果某角色调度失败且其已分配数量小于 minAvailable，则不能继续
 	allocated := ji.getJobAllocatedRoles()
 	for role := range failedRoles {
 		min := ji.TaskMinAvailable[role]
@@ -998,7 +1090,9 @@ func (ji *JobInfo) NeedContinueAllocating(subJobID SubJobID) bool {
 	return true
 }
 
-// getJobAllocatedRoles returns result records each role's allocated number
+// getJobAllocatedRoles 返回每个角色的已分配任务数量
+// 已分配包括：AllocatedStatus（Bound/Binding/Running/Allocated）和 Succeeded 状态的任务
+// 以及 Pending 状态中的 BestEffort 任务(无资源需求，视为自动满足)
 func (ji *JobInfo) getJobAllocatedRoles() map[string]int32 {
 	occupiedMap := map[string]int32{}
 	for status, tasks := range ji.TaskStatusIndex {
@@ -1021,9 +1115,11 @@ func (ji *JobInfo) getJobAllocatedRoles() map[string]int32 {
 	return occupiedMap
 }
 
-// CheckTaskValid returns whether each task of job is valid.
+// CheckTaskValid 检查作业中各角色的任务数量是否有效
+// 当 MinAvailable >= TaskMinAvailableTotal 时才进行检查
+// 如果某角色的实际任务数（包含 Allocated/Succeeded/Pipelined/Pending 状态）小于其 minAvailable，返回 false
 func (ji *JobInfo) CheckTaskValid() bool {
-	// if job minAvailable is less than sum of(task minAvailable), skip this check
+	// 如果 MinAvailable 小于各角色最小成员数之和，跳过此检查
 	if ji.MinAvailable < ji.TaskMinAvailableTotal {
 		return true
 	}
@@ -1049,11 +1145,12 @@ func (ji *JobInfo) CheckTaskValid() bool {
 			return false
 		}
 	}
-
 	return true
 }
 
-// CheckTaskReady return whether each task of job is ready.
+// CheckTaskReady 检查作业中各角色是否已就绪
+// 就绪条件：每个角色的已分配任务数 >= 其 minAvailable
+// 与 CheckTaskValid 不同，此方法只统计已分配和已成功的任务
 func (ji *JobInfo) CheckTaskReady() bool {
 	if ji.MinAvailable < ji.TaskMinAvailableTotal {
 		return true
@@ -1068,7 +1165,8 @@ func (ji *JobInfo) CheckTaskReady() bool {
 	return true
 }
 
-// CheckTaskPipelined return whether each task of job is pipelined.
+// CheckTaskPipelined 检查作业中各角色是否已 Pipelined
+// Pipelined 条件：每个角色的已分配+已成功+已 Pipelined+BestEffort Pending 数 >= 其 minAvailable
 func (ji *JobInfo) CheckTaskPipelined() bool {
 	if ji.MinAvailable < ji.TaskMinAvailableTotal {
 		return true
@@ -1101,7 +1199,9 @@ func (ji *JobInfo) CheckTaskPipelined() bool {
 	return true
 }
 
-// CheckTaskStarving return whether job has at least one task which is starving.
+// CheckTaskStarving 检查作业中是否有角色处于饥饿状态
+// 饥饿条件：某角色的已分配+已成功+已 Pipelined 数 < 其 minAvailable
+// 返回 true 表示至少有一个角色需要更多资源
 func (ji *JobInfo) CheckTaskStarving() bool {
 	if ji.MinAvailable < ji.TaskMinAvailableTotal {
 		return true
@@ -1126,7 +1226,8 @@ func (ji *JobInfo) CheckTaskStarving() bool {
 	return false
 }
 
-// ValidTaskNum returns the number of tasks that are valid.
+// ValidTaskNum 返回有效任务的数量
+// 有效任务包括：Allocated/Succeeded/Pipelined/Pending 状态的任务
 func (ji *JobInfo) ValidTaskNum() int32 {
 	occupied := 0
 	for status, tasks := range ji.TaskStatusIndex {
@@ -1141,6 +1242,8 @@ func (ji *JobInfo) ValidTaskNum() int32 {
 	return int32(occupied)
 }
 
+// CheckSubJobValid 检查子作业的数量是否满足最小子作业数要求
+// 遍历每个子作业组，检查该组中的子作业数量是否 >= MinSubJobs
 func (ji *JobInfo) CheckSubJobValid() bool {
 	subJobs := map[SubJobGID]int32{}
 	for _, subJob := range ji.SubJobs {
@@ -1157,6 +1260,9 @@ func (ji *JobInfo) CheckSubJobValid() bool {
 	return true
 }
 
+// checkSubJobCondition 是子作业条件检查的通用方法
+// 遍历所有子作业，对每个子作业应用条件函数，统计满足条件的子作业数
+// 然后检查每个子作业组中满足条件的子作业数是否 >= minSubGroups
 func (ji *JobInfo) checkSubJobCondition(condition subJobCondition) error {
 	allocatedSubJobs := map[SubJobGID]int32{}
 	for _, subJob := range ji.SubJobs {
@@ -1179,6 +1285,8 @@ func (ji *JobInfo) checkSubJobCondition(condition subJobCondition) error {
 	return nil
 }
 
+// CheckSubJobReady 检查子作业是否已就绪
+// 每个 SubGroupPolicy 组中，就绪的子作业数量必须 >= minSubGroups
 func (ji *JobInfo) CheckSubJobReady() bool {
 	if err := ji.checkSubJobCondition(func(subJob *SubJobInfo) bool {
 		return subJob.IsReady()
@@ -1189,6 +1297,8 @@ func (ji *JobInfo) CheckSubJobReady() bool {
 	return true
 }
 
+// CheckSubJobPipelined 检查子作业是否已 Pipelined
+// 每个 SubGroupPolicy 组中，Pipelined 的子作业数量必须 >= minSubGroups
 func (ji *JobInfo) CheckSubJobPipelined() bool {
 	if err := ji.checkSubJobCondition(func(subJob *SubJobInfo) bool {
 		return subJob.IsPipelined()
@@ -1199,31 +1309,41 @@ func (ji *JobInfo) CheckSubJobPipelined() bool {
 	return true
 }
 
+// IsReady 检查作业是否就绪（满足 Gang Scheduling 的最小可用成员数）
+// 就绪条件：ReadyTaskNum + PendingBestEffortTaskNum >= MinAvailable
 func (ji *JobInfo) IsReady() bool {
 	return ji.ReadyTaskNum()+ji.PendingBestEffortTaskNum() >= ji.MinAvailable
 }
 
+// IsPipelined 检查作业是否已 Pipelined
+// Pipelined 条件：WaitingTaskNum + ReadyTaskNum + PendingBestEffortTaskNum >= MinAvailable
+// 表示作业已有足够任务找到候选节点（部分在等待资源释放）
 func (ji *JobInfo) IsPipelined() bool {
 	return ji.WaitingTaskNum()+ji.ReadyTaskNum()+ji.PendingBestEffortTaskNum() >= ji.MinAvailable
 }
 
+// IsStarving 检查作业是否处于饥饿状态
+// 饥饿条件：WaitingTaskNum + ReadyTaskNum < MinAvailable
+// 表示作业还没有足够的任务找到候选节点
 func (ji *JobInfo) IsStarving() bool {
 	return ji.WaitingTaskNum()+ji.ReadyTaskNum() < ji.MinAvailable
 }
 
-// IsPending returns whether job is in pending status
+// IsPending 返回作业是否处于 Pending 状态
+// 当 PodGroup 为 nil、PodGroup 阶段为 Pending 或为空时返回 true
 func (ji *JobInfo) IsPending() bool {
 	return ji.PodGroup == nil ||
 		ji.PodGroup.Status.Phase == scheduling.PodGroupPending ||
 		ji.PodGroup.Status.Phase == ""
 }
 
-// HasPendingTasks return whether job has pending tasks
+// HasPendingTasks 返回作业是否有 Pending 状态的任务
 func (ji *JobInfo) HasPendingTasks() bool {
 	return len(ji.TaskStatusIndex[Pending]) != 0
 }
 
-// IsHardTopologyMode return whether the job's network topology mode is hard and also return the highest allowed tier
+// IsHardTopologyMode 返回作业的网络拓扑模式是否为硬性模式，以及允许的最高层级
+// 硬性模式表示任务必须部署在满足拓扑约束的节点上，不能降级
 func (ji *JobInfo) IsHardTopologyMode() (bool, int) {
 	if ji.NetworkTopology == nil || ji.NetworkTopology.HighestTierAllowed == nil {
 		return false, 0
@@ -1232,7 +1352,8 @@ func (ji *JobInfo) IsHardTopologyMode() (bool, int) {
 	return ji.NetworkTopology.Mode == scheduling.HardNetworkTopologyMode, *ji.NetworkTopology.HighestTierAllowed
 }
 
-// IsSoftTopologyMode returns whether the job has configured network topologies with soft mode.
+// IsSoftTopologyMode 返回作业是否配置了软性网络拓扑模式
+// 软性模式下，调度器会尽量满足拓扑约束，但允许降级到较低层级的拓扑
 func (ji *JobInfo) IsSoftTopologyMode() bool {
 	if ji.NetworkTopology == nil {
 		return false
@@ -1240,32 +1361,39 @@ func (ji *JobInfo) IsSoftTopologyMode() bool {
 	return ji.NetworkTopology.Mode == scheduling.SoftNetworkTopologyMode
 }
 
-// WithNetworkTopology returns whether the job has configured network topologies
+// WithNetworkTopology 返回作业是否配置了网络拓扑
 func (ji *JobInfo) WithNetworkTopology() bool {
 	return ji.NetworkTopology != nil
 }
 
-// ResetFitErr will set job and node fit err to nil.
+// ResetFitErr 重置作业和节点的调度错误信息
+// 在新的调度周期开始时调用
 func (ji *JobInfo) ResetFitErr() {
 	ji.JobFitErrors = ""
 	ji.NodesFitErrors = make(map[TaskID]*FitErrors)
 }
 
-// ResetSubJobFitErr will set subJob's node fit err to nil.
+// ResetSubJobFitErr 重置指定子作业的节点调度错误信息
+// 使用 maps.DeleteFunc 过滤掉属于指定子作业的任务错误记录
 func (ji *JobInfo) ResetSubJobFitErr(subJob SubJobID) {
 	maps.DeleteFunc(ji.NodesFitErrors, func(taskID TaskID, _ *FitErrors) bool {
 		return ji.TaskToSubJob[taskID] == subJob
 	})
 }
 
+// DefaultSubJobGID 返回默认子作业的组 ID（使用作业 UID）
 func (ji *JobInfo) DefaultSubJobGID() SubJobGID {
 	return SubJobGID(ji.UID)
 }
 
+// DefaultSubJobID 返回默认子作业的 ID（使用作业 UID）
 func (ji *JobInfo) DefaultSubJobID() SubJobID {
 	return SubJobID(ji.UID)
 }
 
+// getOrCreateDefaultSubJob 获取或创建默认子作业
+// 如果作业没有配置 SubGroupPolicy，则所有任务都属于默认子作业
+// 默认子作业的 SubGroupSize 设置为作业的 MinAvailable
 func (ji *JobInfo) getOrCreateDefaultSubJob() *SubJobInfo {
 	defaultSubJobGID := ji.DefaultSubJobGID()
 	defaultSubJob := ji.DefaultSubJobID()
@@ -1282,6 +1410,9 @@ func (ji *JobInfo) getOrCreateDefaultSubJob() *SubJobInfo {
 	return ji.SubJobs[defaultSubJob]
 }
 
+// getOrCreateSubJob 根据 Pod 的标签匹配规则获取或创建子作业
+// 遍历 PodGroup 的 SubGroupPolicy，找到第一个匹配当前任务的策略
+// 如果没有匹配的策略，返回默认子作业
 func (ji *JobInfo) getOrCreateSubJob(ti *TaskInfo) *SubJobInfo {
 	if ji.PodGroup == nil {
 		return ji.getOrCreateDefaultSubJob()
@@ -1301,6 +1432,8 @@ func (ji *JobInfo) getOrCreateSubJob(ti *TaskInfo) *SubJobInfo {
 	return ji.getOrCreateDefaultSubJob()
 }
 
+// addTaskToSubJob 将任务添加到对应的子作业中
+// 根据任务的标签匹配确定其所属的子作业，并更新 TaskToSubJob 映射
 func (ji *JobInfo) addTaskToSubJob(ti *TaskInfo) {
 	subJob := ji.getOrCreateSubJob(ti)
 	subJob.addTask(ti)
@@ -1308,6 +1441,8 @@ func (ji *JobInfo) addTaskToSubJob(ti *TaskInfo) {
 	ji.TaskToSubJob[ti.UID] = subJob.UID
 }
 
+// deleteTaskFromSubJob 从子作业中删除任务
+// 同时清理 TaskToSubJob 映射中的记录
 func (ji *JobInfo) deleteTaskFromSubJob(ti *TaskInfo) {
 	subJobID := ji.TaskToSubJob[ti.UID]
 	if subJob, found := ji.SubJobs[subJobID]; found {
@@ -1317,7 +1452,8 @@ func (ji *JobInfo) deleteTaskFromSubJob(ti *TaskInfo) {
 	delete(ji.TaskToSubJob, ti.UID)
 }
 
-// ContainsSubJobPolicy returns whether the job has any other subJobs besides the virtual default subJob
+// ContainsSubJobPolicy 返回作业是否配置了子作业策略（SubGroupPolicy）
+// 如果配置了，则作业中的任务会根据策略被分配到不同的子作业
 func (ji *JobInfo) ContainsSubJobPolicy() bool {
 	if ji.PodGroup == nil {
 		return false
@@ -1325,7 +1461,8 @@ func (ji *JobInfo) ContainsSubJobPolicy() bool {
 	return len(ji.PodGroup.Spec.SubGroupPolicy) > 0
 }
 
-// ContainsHardTopologyInSubJob returns whether the subJobs in the job contain hard network topology
+// ContainsHardTopologyInSubJob 返回子作业中是否包含硬性网络拓扑约束
+// 遍历所有 SubGroupPolicy，检查是否有策略配置了 HardNetworkTopologyMode
 func (ji *JobInfo) ContainsHardTopologyInSubJob() bool {
 	for _, subJob := range ji.SubJobs {
 		if hard, _ := subJob.IsHardTopologyMode(); hard {
@@ -1335,7 +1472,7 @@ func (ji *JobInfo) ContainsHardTopologyInSubJob() bool {
 	return false
 }
 
-// ContainsHardTopology returns whether the job and the subJobs in the job contain hard network topology
+// ContainsHardTopology 返回作业或其子作业中是否包含硬性网络拓扑约束
 func (ji *JobInfo) ContainsHardTopology() bool {
 	if hard, _ := ji.IsHardTopologyMode(); hard || ji.ContainsHardTopologyInSubJob() {
 		return true
@@ -1343,7 +1480,7 @@ func (ji *JobInfo) ContainsHardTopology() bool {
 	return false
 }
 
-// ContainsNetworkTopologyInSubJob returns whether the subJobs in the job contain network topology
+// ContainsNetworkTopologyInSubJob 返回子作业中是否配置了网络拓扑
 func (ji *JobInfo) ContainsNetworkTopologyInSubJob() bool {
 	for _, subJob := range ji.SubJobs {
 		if subJob.WithNetworkTopology() {
@@ -1353,7 +1490,7 @@ func (ji *JobInfo) ContainsNetworkTopologyInSubJob() bool {
 	return false
 }
 
-// ContainsNetworkTopology returns whether the job and the subJobs in the job contain network topology
+// ContainsNetworkTopology 返回作业或其子作业中是否配置了网络拓扑
 func (ji *JobInfo) ContainsNetworkTopology() bool {
 	return ji.WithNetworkTopology() || ji.ContainsNetworkTopologyInSubJob()
 }

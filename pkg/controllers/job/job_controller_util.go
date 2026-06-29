@@ -225,11 +225,11 @@ func applyPolicies(job *batch.Job, req *apis.Request) (delayAct *delayAction) {
 
 					if len(policyEvents) > 0 && len(req.Event) > 0 {
 						if checkEventExist(policyEvents, req.Event) || checkEventExist(policyEvents, v1alpha1.AnyEvent) {
-							// Check if the event requires a timeout configuration, and whether a timeout policy is specified.
-							// If the event does not require a timeout (shouldConfigureTimeout returns false),
-							// or if a timeout policy is already set (policy.Timeout != nil),
-							// execute the corresponding delay action and set the delay time based on the policy's Timeout.Duration.
-							// If a timeout policy is specified, set the delay to the timeout duration.
+							// 检查该事件是否需要配置超时，以及是否已经指定了超时策略。
+							// 如果事件不需要超时配置（shouldConfigureTimeout 返回 false），
+							// 或者已经设置了超时策略（policy.Timeout != nil），
+							// 则执行对应的延迟动作，并根据策略中的 Timeout.Duration 设置 delay。
+							// 如果已经指定了 timeout policy，则将 delay 设置为该超时时长。
 							if !shouldConfigureTimeout(req.Event) || policy.Timeout != nil {
 								delayAct.action = policy.Action
 								if policy.Timeout != nil {

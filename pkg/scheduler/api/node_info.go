@@ -90,6 +90,7 @@ type NodeInfo struct {
 	// ImageStates holds the entry of an image if and only if this image is on the node. The entry can be used for
 	// checking an image's existence and advanced usage (e.g., image locality scheduling policy) based on the image
 	// state information.
+	// 当前这个 node 上有哪些镜像，以及这些镜像的状态信息
 	ImageStates map[string]*fwk.ImageStateSummary
 
 	// Generation is incremented every time the cache is updated (node add/update/delete)
@@ -183,32 +184,45 @@ func NewNodeInfo(node *v1.Node) *NodeInfo {
 	return nodeInfo
 }
 
-// RefreshNumaSchedulerInfoByCrd used to update scheduler numa information based the CRD numatopo
+// RefreshNumaSchedulerInfoByCrd 根据 CRD 中的 numatopo 信息刷新调度器使用的 NUMA 信息
 func (ni *NodeInfo) RefreshNumaSchedulerInfoByCrd() {
+	// 如果节点没有 NUMA 信息，则清空调度器中的 NUMA 信息并返回
 	if ni.NumaInfo == nil {
 		ni.NumaSchedulerInfo = nil
 		return
 	}
 
+	// 深拷贝一份最新的 NUMA 信息，避免直接修改原始数据
 	tmp := ni.NumaInfo.DeepCopy()
+
+	// 如果调度器中的 NUMA 信息为空，或者标记为资源变多，则直接整体替换
 	if ni.NumaSchedulerInfo == nil || ni.NumaChgFlag == NumaInfoMoreFlag {
 		ni.NumaSchedulerInfo = tmp
+
+		// 如果标记为资源变少，则按资源逐项更新
 	} else if ni.NumaChgFlag == NumaInfoLessFlag {
 		numaResMap := ni.NumaSchedulerInfo.NumaResMap
+
+		// 遍历最新 NUMA 资源信息
 		for resName, resInfo := range tmp.NumaResMap {
+			// 如果当前调度器中已存在该资源
 			if resourceInfo, ok := numaResMap[resName]; ok {
 				klog.V(5).Infof("resource %s Allocatable : current %v new %v on node %s",
 					resName, resourceInfo, resInfo, ni.Name)
+
+				// 只有当前可分配资源大于等于新值时，才更新为更小的值
 				if resourceInfo.Allocatable.Size() >= resInfo.Allocatable.Size() {
 					resourceInfo.Allocatable = resInfo.Allocatable.Clone()
 					resourceInfo.Capacity = resInfo.Capacity
 				}
 			} else {
+				// 如果该资源不存在，则直接新增
 				numaResMap[resName] = resInfo
 			}
 		}
 	}
 
+	// 刷新完成后，重置变更标记
 	ni.NumaChgFlag = NumaInfoResetFlag
 }
 

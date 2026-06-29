@@ -29,6 +29,18 @@ import (
 	"volcano.sh/volcano/pkg/scheduler/plugins/util"
 )
 
+/*
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: myapp-pdb
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: myapp
+*/
+
 // PluginName indicates name of volcano scheduler plugin
 const PluginName = "pdb"
 
@@ -75,6 +87,7 @@ func (pp *pdbPlugin) OnSessionOpen(ssn *framework.Session) {
 		// (b. init the pdbsAllowed array
 		pdbsAllowed := make([]int32, len(pdbs))
 		for i, pdb := range pdbs {
+			// DisruptionsAllowed 当前允许被自愿驱逐(eviction)的 Pod 数量
 			pdbsAllowed[i] = pdb.Status.DisruptionsAllowed
 		}
 

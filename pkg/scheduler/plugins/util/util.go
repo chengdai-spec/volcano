@@ -139,18 +139,18 @@ func GetInqueueResource(job *api.JobInfo, allocated *api.Resource) *api.Resource
 	return inqueue
 }
 
-// ShouldAbort determines if the given status indicates that execution should be aborted.
-// It checks if the status code corresponds to any of the following conditions:
-// - UnschedulableAndUnresolvable: Indicates the task cannot be scheduled and resolved.
-// - Error: Represents an error state that prevents further execution.
-// - Wait: Suggests that the process should pause and not proceed further.
-// - Skip: Indicates that the operation should be skipped entirely.
+// ShouldAbort 用于判断给定的状态是否表示执行应该中止。
+// 它会检查该状态码是否属于以下任一情况：
+// - UnschedulableAndUnresolvable：表示任务无法被调度，并且无法通过其他方式解决。
+// - Error：表示发生了错误状态，阻止后续执行。
+// - Wait：表示流程应该暂停，不应继续向下执行。
+// - Skip：表示该操作应该被完全跳过。
 //
-// Parameters:
-// - status (*api.Status): The status object to evaluate.
+// 参数：
+// - status (*api.Status)：需要评估的状态对象。
 //
-// Returns:
-// - bool: True if the status code matches any of the abort conditions; false otherwise.
+// 返回值：
+// - bool：如果状态码匹配上述任一中止条件，则返回 true；否则返回 false。
 func ShouldAbort(status *api.Status) bool {
 	return status.Code == api.UnschedulableAndUnresolvable ||
 		status.Code == api.Error ||

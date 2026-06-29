@@ -88,6 +88,7 @@ func PromHandler() http.Handler {
 // SetupComponentGlobals discovers the API server version and sets
 // Volcano's effective version + feature gate defaults to match the cluster.
 // This makes defaults (like DRA) correct on older clusters.
+// 连接 Kubernetes API Server，获取集群版本，然后把 Volcano 的默认版本/特性开关设置成和当前集群匹配
 func SetupComponentGlobals(config *restclient.Config) error {
 	client, err := clientset.NewForConfig(config)
 	if err != nil {

@@ -14,6 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package volumebinding 实现了 Volcano 调度器中的卷绑定插件。
+// 该插件负责在调度过程中处理 Pod 的 PVC（PersistentVolumeClaim）绑定逻辑，
+// 包括检查 PVC 状态、查找匹配的 PV、节点亲和性校验、动态供给以及最终绑定等。
 package volumebinding
 
 import (
@@ -45,42 +48,54 @@ import (
 )
 
 const (
+	// stateKey 用于在 CycleState 中存储/读取 volumeBinding 插件的状态数据。
 	stateKey fwk.StateKey = Name
 
+	// maxUtilization 表示存储利用率的最大值（100%），用于评分归一化。
 	maxUtilization = 100
 )
 
-// the state is initialized in PreFilter phase. because we save the pointer in
-// framework.CycleState, in the later phases we don't need to call Write method
-// to update the value
+// stateData 保存了 volumeBinding 插件在整个调度周期（PreFilter -> Filter -> Reserve -> PreBind）中需要的状态。
+// 该状态在 PreFilter 阶段初始化，后续阶段通过同一个指针访问，因此无需显式 Write 更新。
 type stateData struct {
+	// allBound 标记该 Pod 的所有 PVC 是否都已绑定（AssumePodVolumes 的结果）。
 	allBound bool
-	// podVolumesByNode holds the pod's volume information found in the Filter
-	// phase for each node
-	// it's initialized in the PreFilter phase
+	// podVolumesByNode 记录 Filter 阶段为每个候选节点找到的卷绑定方案（PodVolumes）。
+	// 在 PreFilter 阶段初始化为空 map，在 Filter 阶段按节点填充。
 	podVolumesByNode map[string]*PodVolumes
-	podVolumeClaims  *PodVolumeClaims
-	// hasStaticBindings declares whether the pod contains one or more StaticBinding.
-	// If not, volumeBinding will skip score extension point.
+	// podVolumeClaims 保存 Pod 中所有 PVC 的分类信息（已绑定、延迟绑定未绑定、立即绑定未绑定）。
+	podVolumeClaims *PodVolumeClaims
+	// hasStaticBindings 声明 Pod 是否包含一个或多个静态绑定（StaticBinding）。
+	// 如果没有静态绑定，volumeBinding 将跳过 Score 扩展点。
 	hasStaticBindings bool
+	// 互斥锁，保护 podVolumesByNode 和 hasStaticBindings 的并发访问。
+	// 因为多个节点会并发执行 Filter，必须通过锁保证状态安全。
 	sync.Mutex
 }
 
+// Clone 返回自身指针。
+// 由于 CycleState 可能在多个节点间共享时会被复制，但 stateData 内部使用锁保护共享字段，
+// 因此直接返回指针以保留同一份状态。
 func (d *stateData) Clone() fwk.StateData {
 	return d
 }
 
-// VolumeBinding is a plugin that binds pod volumes in scheduling.
-// In the Filter phase, pod binding cache is created for the pod and used in
-// Reserve and PreBind phases.
+// VolumeBinding 是卷绑定插件的主体结构体。
+// 它在 Filter 阶段为 Pod 创建绑定缓存，并在 Reserve 和 PreBind 阶段使用这些缓存完成卷的假定绑定和真实绑定
 type VolumeBinding struct {
-	Binder      SchedulerVolumeBinder
-	PVCLister   corelisters.PersistentVolumeClaimLister
+	// Binder 是卷绑定器，负责查找/假定/回滚/绑定 Pod 卷
+	Binder SchedulerVolumeBinder
+	// PVCLister 用于列出 PersistentVolumeClaim
+	PVCLister corelisters.PersistentVolumeClaimLister
+	// classLister 用于列出 StorageClass
 	classLister storagelisters.StorageClassLister
-	scorer      volumeCapacityScorer
-	fts         feature.Features
+	// scorer 是存储容量评分函数，基于 StorageClass 的容量利用率打分
+	scorer volumeCapacityScorer
+	// fts 保存调度框架特性开关，例如 EnableStorageCapacityScoring、EnableSchedulingQueueHint
+	fts feature.Features
 }
 
+// 以下接口断言确保 VolumeBinding 实现了对应的调度框架扩展点。
 var _ fwk.PreFilterPlugin = &VolumeBinding{}
 var _ fwk.FilterPlugin = &VolumeBinding{}
 var _ fwk.ReservePlugin = &VolumeBinding{}
@@ -90,61 +105,62 @@ var _ fwk.ScorePlugin = &VolumeBinding{}
 var _ fwk.EnqueueExtensions = &VolumeBinding{}
 var _ fwk.SignPlugin = &VolumeBinding{}
 
-// Name is the name of the plugin used in Registry and configurations.
+// Name 是插件在注册表和配置中的名称。
 const Name = names.VolumeBinding
 
-// Name returns name of the plugin. It is used in logs, etc.
+// Name 返回插件名称，用于日志等场景。
 func (pl *VolumeBinding) Name() string {
 	return Name
 }
 
-// Feasibility and scoring based on the non-synthetic volume sources.
+// SignPod 基于非合成卷源为 Pod 生成签名片段。
+// 返回值包含一个 VolumesSignerName 片段，其值为根据 Pod 卷计算出的签名，
+// 用于调度器识别具有相同卷需求的 Pod 组。
 func (pl *VolumeBinding) SignPod(ctx context.Context, pod *v1.Pod) ([]fwk.SignFragment, *fwk.Status) {
 	return []fwk.SignFragment{
 		{Key: fwk.VolumesSignerName, Value: fwk.VolumesSigner(pod)},
 	}, nil
 }
 
-// EventsToRegister returns the possible events that may make a Pod
-// failed by this plugin schedulable.
+// EventsToRegister 返回可能使被本插件判定为不可调度的 Pod 重新变为可调度的集群事件。
+// 调度队列通过监听这些事件，在相关资源发生变化时重新尝试调度之前失败的 Pod。
 func (pl *VolumeBinding) EventsToRegister(_ context.Context) ([]fwk.ClusterEventWithHint, error) {
-	// Pods may fail to find available PVs because the node labels do not
-	// match the storage class's allowed topologies or PV's node affinity.
-	// A new or updated node may make pods schedulable.
+	// 当节点标签与 StorageClass 的 allowedTopologies 或 PV 的节点亲和性不匹配时，
+	// Pod 可能无法找到可用 PV。新增或更新节点可能使 Pod 变为可调度。
 	//
-	// A note about UpdateNodeTaint event:
-	// Ideally, it's supposed to register only Add | UpdateNodeLabel because UpdateNodeTaint will never change the result from this plugin.
-	// But, we may miss Node/Add event due to preCheck, and we decided to register UpdateNodeTaint | UpdateNodeLabel for all plugins registering Node/Add.
-	// See: https://github.com/kubernetes/kubernetes/issues/109437
+	// 关于 UpdateNodeTaint 事件的说明：
+	// 理论上只需要 Add | UpdateNodeLabel，因为 UpdateNodeTaint 不会影响本插件的结果。
+	// 但由于 preCheck 可能漏掉 Node/Add 事件，因此对所有注册 Node/Add 的插件同时注册 UpdateNodeTaint | UpdateNodeLabel。
+	// 参见：https://github.com/kubernetes/kubernetes/issues/109437
 	nodeActionType := fwk.Add | fwk.UpdateNodeLabel | fwk.UpdateNodeTaint
 	if pl.fts.EnableSchedulingQueueHint {
-		// When scheduling queue hint is enabled, we don't use the problematic preCheck and don't need to register UpdateNodeTaint event.
+		// 启用调度队列提示后，不再使用有问题的 preCheck，因此无需注册 UpdateNodeTaint。
 		nodeActionType = fwk.Add | fwk.UpdateNodeLabel
 	}
 	events := []fwk.ClusterEventWithHint{
-		// Pods may fail because of missing or mis-configured storage class
-		// (e.g., allowedTopologies, volumeBindingMode), and hence may become
-		// schedulable upon StorageClass Add or Update events.
+		// StorageClass 缺失或配置错误(如 allowedTopologies、volumeBindingMode)会导致 Pod 不可调度。
+		// StorageClass 新增或更新时，可能使 Pod 重新变为可调度。
 		{Event: fwk.ClusterEvent{Resource: fwk.StorageClass, ActionType: fwk.Add | fwk.Update}, QueueingHintFn: pl.isSchedulableAfterStorageClassChange},
 
-		// We bind PVCs with PVs, so any changes may make the pods schedulable.
+		// PVC 与 PV 的绑定关系会直接影响 Pod 可调度性，因此监听 PVC/PV 的新增和更新。
 		{Event: fwk.ClusterEvent{Resource: fwk.PersistentVolumeClaim, ActionType: fwk.Add | fwk.Update}, QueueingHintFn: pl.isSchedulableAfterPersistentVolumeClaimChange},
 		{Event: fwk.ClusterEvent{Resource: fwk.PersistentVolume, ActionType: fwk.Add | fwk.Update}},
 
 		{Event: fwk.ClusterEvent{Resource: fwk.Node, ActionType: nodeActionType}},
 
-		// We rely on CSI node to translate in-tree PV to CSI.
-		// TODO: kube-scheduler will unregister the CSINode events once all the volume plugins has completed their CSI migration.
+		// 依赖 CSINode 将 in-tree PV 翻译为 CSI。
+		// TODO: 当所有卷插件完成 CSI 迁移后，kube-scheduler 将取消注册 CSINode 事件。
 		{Event: fwk.ClusterEvent{Resource: fwk.CSINode, ActionType: fwk.Add | fwk.Update}, QueueingHintFn: pl.isSchedulableAfterCSINodeChange},
 
-		// When CSIStorageCapacity is enabled, pods may become schedulable
-		// on CSI driver & storage capacity changes.
+		// 启用 CSI 存储容量跟踪时，CSI 驱动和存储容量的变化可能使 Pod 变为可调度。
 		{Event: fwk.ClusterEvent{Resource: fwk.CSIDriver, ActionType: fwk.Update}, QueueingHintFn: pl.isSchedulableAfterCSIDriverChange},
 		{Event: fwk.ClusterEvent{Resource: fwk.CSIStorageCapacity, ActionType: fwk.Add | fwk.Update}, QueueingHintFn: pl.isSchedulableAfterCSIStorageCapacityChange},
 	}
 	return events, nil
 }
 
+// isSchedulableAfterCSINodeChange 判断 CSINode 变更是否可能使 Pod 变为可调度。
+// 主要关注 migrated plugins annotation 是否发生变化，因为该注解变化可能影响 in-tree 到 CSI 的迁移结果。
 func (pl *VolumeBinding) isSchedulableAfterCSINodeChange(logger klog.Logger, pod *v1.Pod, oldObj, newObj interface{}) (fwk.QueueingHint, error) {
 	if oldObj == nil {
 		logger.V(5).Info("CSINode creation could make the pod schedulable")
@@ -170,6 +186,8 @@ func (pl *VolumeBinding) isSchedulableAfterCSINodeChange(logger klog.Logger, pod
 	return fwk.QueueSkip, nil
 }
 
+// isSchedulableAfterPersistentVolumeClaimChange 判断 PVC 变更是否可能使 Pod 变为可调度。
+// 只有 Pod 实际引用的、且与 Pod 同命名空间的 PVC 新增或更新时，才认为可能重新调度。
 func (pl *VolumeBinding) isSchedulableAfterPersistentVolumeClaimChange(logger klog.Logger, pod *v1.Pod, oldObj, newObj interface{}) (fwk.QueueingHint, error) {
 	_, newPVC, err := util.As[*v1.PersistentVolumeClaim](oldObj, newObj)
 	if err != nil {
@@ -199,8 +217,7 @@ func (pl *VolumeBinding) isSchedulableAfterPersistentVolumeClaimChange(logger kl
 		}
 
 		if pvcName == newPVC.Name {
-			// Return Queue because, in this case,
-			// all PVC creations and almost all PVC updates could make the Pod schedulable.
+			// 返回 Queue，因为这种情况下 PVC 的新增和大多数更新都可能使目标 Pod 变为可调度。
 			logger.V(5).Info("PersistentVolumeClaim the pod requires was created or updated, potentially making the target Pod schedulable")
 			return fwk.Queue, nil
 		}
@@ -210,10 +227,9 @@ func (pl *VolumeBinding) isSchedulableAfterPersistentVolumeClaimChange(logger kl
 	return fwk.QueueSkip, nil
 }
 
-// isSchedulableAfterStorageClassChange checks whether an StorageClass event might make a Pod schedulable or not.
-// Any StorageClass addition and a StorageClass update to allowedTopologies
-// might make a Pod schedulable.
-// Note that an update to volume binding mode is not allowed and we don't have to consider while examining the update event.
+// isSchedulableAfterStorageClassChange 判断 StorageClass 变更是否可能使 Pod 变为可调度。
+// StorageClass 的新增以及 allowedTopologies 字段的更新都可能改变 Pod 的可调度性。
+// 注意：volumeBindingMode 不允许更新，因此无需考虑该字段变化。
 func (pl *VolumeBinding) isSchedulableAfterStorageClassChange(logger klog.Logger, pod *v1.Pod, oldObj, newObj interface{}) (fwk.QueueingHint, error) {
 	oldSC, newSC, err := util.As[*storagev1.StorageClass](oldObj, newObj)
 	if err != nil {
@@ -227,8 +243,7 @@ func (pl *VolumeBinding) isSchedulableAfterStorageClassChange(logger klog.Logger
 	)
 
 	if oldSC == nil {
-		// No further filtering can be made for a creation event,
-		// and we just always return Queue.
+		// 对于新增事件，无法进一步过滤，总是返回 Queue。
 		logger.V(5).Info("A new StorageClass was created, which could make a Pod schedulable")
 		return fwk.Queue, nil
 	}
@@ -242,12 +257,9 @@ func (pl *VolumeBinding) isSchedulableAfterStorageClassChange(logger klog.Logger
 	return fwk.QueueSkip, nil
 }
 
-// isSchedulableAfterCSIStorageCapacityChange checks whether a CSIStorageCapacity event
-// might make a Pod schedulable or not.
-// Any CSIStorageCapacity addition and a CSIStorageCapacity update to volume limit
-// (calculated based on capacity and maximumVolumeSize) might make a Pod schedulable.
-// Note that an update to nodeTopology and storageClassName is not allowed and
-// we don't have to consider while examining the update event.
+// isSchedulableAfterCSIStorageCapacityChange 判断 CSIStorageCapacity 变更是否可能使 Pod 变为可调度。
+// CSIStorageCapacity 的新增以及 volume limit（基于 capacity 和 maximumVolumeSize 计算）的提升都可能使 Pod 可调度。
+// 注意：nodeTopology 和 storageClassName 不允许更新，因此无需考虑。
 func (pl *VolumeBinding) isSchedulableAfterCSIStorageCapacityChange(logger klog.Logger, pod *v1.Pod, oldObj, newObj interface{}) (fwk.QueueingHint, error) {
 	oldCap, newCap, err := util.As[*storagev1beta1.CSIStorageCapacity](oldObj, newObj)
 	if err != nil {
@@ -283,6 +295,9 @@ func (pl *VolumeBinding) isSchedulableAfterCSIStorageCapacityChange(logger klog.
 	return fwk.QueueSkip, nil
 }
 
+// isSchedulableAfterCSIDriverChange 判断 CSIDriver 变更是否可能使 Pod 变为可调度。
+// 当 Pod 使用了某个 CSI 驱动，且该驱动的 StorageCapacity 从启用变为禁用时，
+// 意味着不再受容量限制约束，可能使之前因容量不足而不可调度的 Pod 变为可调度。
 func (pl *VolumeBinding) isSchedulableAfterCSIDriverChange(logger klog.Logger, pod *v1.Pod, oldObj, newObj interface{}) (fwk.QueueingHint, error) {
 	originalCSIDriver, modifiedCSIDriver, err := util.As[*storagev1.CSIDriver](oldObj, newObj)
 	if err != nil {
@@ -310,9 +325,9 @@ func (pl *VolumeBinding) isSchedulableAfterCSIDriverChange(logger klog.Logger, p
 	return fwk.QueueSkip, nil
 }
 
-// podHasPVCs returns 2 values:
-// - the first one to denote if the given "pod" has any PVC defined.
-// - the second one to return any error if the requested PVC is illegal.
+// podHasPVCs 返回两个值：
+// 1. 给定 Pod 是否定义了任何 PVC；
+// 2. 如果请求的 PVC 不合法，返回相应错误。
 func (pl *VolumeBinding) podHasPVCs(pod *v1.Pod) (bool, error) {
 	hasPVC := false
 	for _, vol := range pod.Spec.Volumes {
@@ -325,15 +340,15 @@ func (pl *VolumeBinding) podHasPVCs(pod *v1.Pod) (bool, error) {
 			pvcName = ephemeral.VolumeClaimName(pod, &vol)
 			isEphemeral = true
 		default:
-			// Volume is not using a PVC, ignore
+			// 该 Volume 未使用 PVC，忽略。
 			continue
 		}
 		hasPVC = true
 		pvc, err := pl.PVCLister.PersistentVolumeClaims(pod.Namespace).Get(pvcName)
 		if err != nil {
-			// The error usually has already enough context ("persistentvolumeclaim "myclaim" not found"),
-			// but we can do better for generic ephemeral inline volumes where that situation
-			// is normal directly after creating a pod.
+			// 错误信息通常已经足够（如 persistentvolumeclaim "myclaim" not found），
+			// 但对于通用临时卷（generic ephemeral inline volumes），创建 Pod 后立即出现未找到是正常现象，
+			// 因此给出更友好的提示。
 			if isEphemeral && apierrors.IsNotFound(err) {
 				err = fmt.Errorf("waiting for ephemeral volume controller to create the persistentvolumeclaim %q", pvcName)
 			}
@@ -357,12 +372,12 @@ func (pl *VolumeBinding) podHasPVCs(pod *v1.Pod) (bool, error) {
 	return hasPVC, nil
 }
 
-// PreFilter invoked at the prefilter extension point to check if pod has all
-// immediate PVCs bound. If not all immediate PVCs are bound, an
-// UnschedulableAndUnresolvable is returned.
+// PreFilter 在 prefilter 扩展点被调用，检查 Pod 的所有 immediate PVC 是否都已绑定。
+// 如果存在未绑定的 immediate PVC，则返回 UnschedulableAndUnresolvable，
+// Pod 会被放入 active/backoff 队列，等待 PV controller 完成绑定后再重试。
 func (pl *VolumeBinding) PreFilter(ctx context.Context, state fwk.CycleState, pod *v1.Pod, _ []fwk.NodeInfo) (*fwk.PreFilterResult, *fwk.Status) {
 	logger := klog.FromContext(ctx)
-	// If pod does not reference any PVC, we don't need to do anything.
+	// 如果 Pod 没有引用任何 PVC，则无需后续处理。
 	if hasPVC, err := pl.podHasPVCs(pod); err != nil {
 		return nil, fwk.NewStatus(fwk.UnschedulableAndUnresolvable, err.Error())
 	} else if !hasPVC {
@@ -374,9 +389,8 @@ func (pl *VolumeBinding) PreFilter(ctx context.Context, state fwk.CycleState, po
 		return nil, fwk.AsStatus(err)
 	}
 	if len(podVolumeClaims.unboundClaimsImmediate) > 0 {
-		// Return UnschedulableAndUnresolvable error if immediate claims are
-		// not bound. Pod will be moved to active/backoff queues once these
-		// claims are bound by PV controller.
+		// 如果 immediate 类型的 PVC 未绑定，返回 UnschedulableAndUnresolvable
+		// Pod 将在这些 PVC 被 PV controller 绑定后，重新进入调度队列
 		status := fwk.NewStatus(fwk.UnschedulableAndUnresolvable)
 		status.AppendReason("pod has unbound immediate PersistentVolumeClaims")
 		return nil, status
@@ -392,11 +406,13 @@ func (pl *VolumeBinding) PreFilter(ctx context.Context, state fwk.CycleState, po
 	return nil, nil
 }
 
-// PreFilterExtensions returns prefilter extensions, pod add and remove.
+// PreFilterExtensions 返回 prefilter 扩展接口（Pod 添加/移除时的处理）。
+// volumeBinding 不需要该扩展，因此返回 nil。
 func (pl *VolumeBinding) PreFilterExtensions() fwk.PreFilterExtensions {
 	return nil
 }
 
+// getStateData 从 CycleState 中读取并转换为 stateData。
 func getStateData(cs fwk.CycleState) (*stateData, error) {
 	state, err := cs.Read(stateKey)
 	if err != nil {
@@ -409,21 +425,15 @@ func getStateData(cs fwk.CycleState) (*stateData, error) {
 	return s, nil
 }
 
-// Filter invoked at the filter extension point.
-// It evaluates if a pod can fit due to the volumes it requests,
-// for both bound and unbound PVCs.
+// Filter 在 filter 扩展点被调用，评估 Pod 是否能因所请求的卷而适配到当前节点。
 //
-// For PVCs that are bound, then it checks that the corresponding PV's node affinity is
-// satisfied by the given node.
+// 对于已绑定的 PVC，检查对应 PV 的节点亲和性是否被给定节点满足。
 //
-// For PVCs that are unbound, it tries to find available PVs that can satisfy the PVC requirements
-// and that the PV node affinity is satisfied by the given node.
+// 对于未绑定的 PVC，尝试找到可用的 PV，使其满足 PVC 需求且 PV 节点亲和性被节点满足。
 //
-// If storage capacity tracking is enabled, then enough space has to be available
-// for the node and volumes that still need to be created.
+// 如果启用了存储容量跟踪，还需为节点和仍需创建的卷预留足够空间。
 //
-// The predicate returns true if all bound PVCs have compatible PVs with the node, and if all unbound
-// PVCs can be matched with an available and node-compatible PV.
+// 当所有已绑定 PVC 的 PV 与节点兼容，且所有未绑定 PVC 都能匹配到可用且节点兼容的 PV 时，返回成功。
 func (pl *VolumeBinding) Filter(ctx context.Context, cs fwk.CycleState, pod *v1.Pod, nodeInfo fwk.NodeInfo) *fwk.Status {
 	logger := klog.FromContext(ctx)
 	node := nodeInfo.Node()
@@ -446,7 +456,8 @@ func (pl *VolumeBinding) Filter(ctx context.Context, cs fwk.CycleState, pod *v1.
 		return status
 	}
 
-	// multiple goroutines call `Filter` on different nodes simultaneously and the `CycleState` may be duplicated, so we must use a local lock here
+	// 多个 goroutine 会并发在不同节点上调用 Filter，且 CycleState 可能被复制，
+	// 因此必须加本地锁保护共享状态。
 	state.Lock()
 	state.podVolumesByNode[node.Name] = podVolumes
 	state.hasStaticBindings = state.hasStaticBindings || (podVolumes != nil && len(podVolumes.StaticBindings) > 0)
@@ -454,7 +465,8 @@ func (pl *VolumeBinding) Filter(ctx context.Context, cs fwk.CycleState, pod *v1.
 	return nil
 }
 
-// PreScore invoked at the preScore extension point. It checks whether volumeBinding can skip Score
+// PreScore 在 prescore 扩展点被调用，判断 volumeBinding 是否可以跳过 Score。
+// 如果未配置 scorer，或者没有静态绑定且未启用存储容量评分，则跳过 Score。
 func (pl *VolumeBinding) PreScore(ctx context.Context, cs fwk.CycleState, pod *v1.Pod, nodes []fwk.NodeInfo) *fwk.Status {
 	if pl.scorer == nil {
 		return fwk.NewStatus(fwk.Skip)
@@ -469,7 +481,9 @@ func (pl *VolumeBinding) PreScore(ctx context.Context, cs fwk.CycleState, pod *v
 	return fwk.NewStatus(fwk.Skip)
 }
 
-// Score invoked at the score extension point.
+// Score 在 score 扩展点被调用，对节点进行存储容量评分。
+// 评分逻辑根据静态绑定或动态供给分别汇总每个 StorageClass 的请求容量和可用容量，
+// 然后通过 scorer 函数计算最终分数。
 func (pl *VolumeBinding) Score(ctx context.Context, cs fwk.CycleState, pod *v1.Pod, nodeInfo fwk.NodeInfo) (int64, *fwk.Status) {
 	if pl.scorer == nil {
 		return 0, nil
@@ -484,9 +498,21 @@ func (pl *VolumeBinding) Score(ctx context.Context, cs fwk.CycleState, pod *v1.P
 		return 0, nil
 	}
 
+	/*
+		apiVersion: storage.k8s.io/v1beta1
+		kind: CSIStorageCapacity
+		metadata:
+		  name: fast-ssd-zone-a
+		  namespace: kube-system
+		storageClassName: fast-ssd
+		capacity: 500Gi
+		nodeTopology:
+		  matchLabels:
+			topology.kubernetes.io/zone: zone-a
+	*/
 	classResources := make(classResourceMap)
 	if len(podVolumes.StaticBindings) != 0 || !pl.fts.EnableStorageCapacityScoring {
-		// group static binding volumes by storage class
+		// 按 StorageClass 聚合静态绑定卷的容量信息。
 		for _, staticBinding := range podVolumes.StaticBindings {
 			class := staticBinding.StorageClassName()
 			storageResource := staticBinding.StorageResource()
@@ -500,7 +526,7 @@ func (pl *VolumeBinding) Score(ctx context.Context, cs fwk.CycleState, pod *v1.P
 			classResources[class].Capacity += storageResource.Capacity
 		}
 	} else {
-		// group dynamic binding volumes by storage class
+		// 按 StorageClass 聚合动态供给卷的容量信息。
 		for _, provision := range podVolumes.DynamicProvisions {
 			if provision.NodeCapacity == nil {
 				continue
@@ -512,9 +538,9 @@ func (pl *VolumeBinding) Score(ctx context.Context, cs fwk.CycleState, pod *v1.P
 					Capacity:  0,
 				}
 			}
-			// The following line cannot be +=. For example, if a Pod requests two 50GB volumes from
-			// a StorageClass with 100GB of capacity on a node, this part of the code will be executed twice.
-			// In that case, using += would incorrectly set classResources[class].Capacity to 200GB.
+			// 注意：下面这行不能写成 +=。例如，Pod 请求两个 50GB 卷，
+			// 而节点上该 StorageClass 容量为 100GB，这段代码会执行两次。
+			// 如果使用 +=，classResources[class].Capacity 会被错误地累加为 200GB。
 			classResources[class].Capacity = provision.NodeCapacity.Capacity.Value()
 			requestedQty := provision.PVC.Spec.Resources.Requests[v1.ResourceName(v1.ResourceStorage)]
 			classResources[class].Requested += requestedQty.Value()
@@ -524,18 +550,20 @@ func (pl *VolumeBinding) Score(ctx context.Context, cs fwk.CycleState, pod *v1.P
 	return pl.scorer(classResources), nil
 }
 
-// ScoreExtensions of the Score plugin.
+// ScoreExtensions 返回 Score 插件的扩展接口。
 func (pl *VolumeBinding) ScoreExtensions() fwk.ScoreExtensions {
 	return nil
 }
 
-// Reserve reserves volumes of pod and saves binding status in cycle state.
+// Reserve 在 reserve 扩展点被调用，假定绑定 Pod 的卷并将绑定状态保存到 cycle state。
+// 对于选定的节点，调用 Binder.AssumePodVolumes 在内部缓存中假定 PV/PVC 绑定，
+// 返回 allBound 表示是否所有卷都已经绑定。
 func (pl *VolumeBinding) Reserve(ctx context.Context, cs fwk.CycleState, pod *v1.Pod, nodeName string) *fwk.Status {
 	state, err := getStateData(cs)
 	if err != nil {
 		return fwk.AsStatus(err)
 	}
-	// we don't need to hold the lock as only one node will be reserved for the given pod
+	// 给定 Pod 只会 reserve 一个节点，因此无需加锁
 	podVolumes, ok := state.podVolumesByNode[nodeName]
 	if ok {
 		allBound, err := pl.Binder.AssumePodVolumes(klog.FromContext(ctx), pod, nodeName, podVolumes)
@@ -544,27 +572,24 @@ func (pl *VolumeBinding) Reserve(ctx context.Context, cs fwk.CycleState, pod *v1
 		}
 		state.allBound = allBound
 	} else {
-		// may not exist if the pod does not reference any PVC
+		// 如果 Pod 没有引用任何 PVC，map 中可能不存在该节点
 		state.allBound = true
 	}
 	return nil
 }
 
-// PreBind will make the API update with the assumed bindings and wait until
-// the PV controller has completely finished the binding operation.
-//
-// If binding errors, times out or gets undone, then an error will be returned to
-// retry scheduling.
+// PreBind 执行真正的 API 更新以完成假定绑定，并等待 PV controller 完成绑定操作
+// 如果绑定出错、超时或被撤销，则返回错误以重试调度。
 func (pl *VolumeBinding) PreBind(ctx context.Context, cs fwk.CycleState, pod *v1.Pod, nodeName string) *fwk.Status {
 	s, err := getStateData(cs)
 	if err != nil {
 		return fwk.AsStatus(err)
 	}
 	if s.allBound {
-		// no need to bind volumes
+		// 所有卷已绑定，无需再绑定。
 		return nil
 	}
-	// we don't need to hold the lock as only one node will be pre-bound for the given pod
+	// 给定 Pod 只会 pre-bind 一个节点，因此无需加锁。
 	podVolumes, ok := s.podVolumesByNode[nodeName]
 	if !ok {
 		return fwk.AsStatus(fmt.Errorf("no pod volumes found for node %q", nodeName))
@@ -580,14 +605,14 @@ func (pl *VolumeBinding) PreBind(ctx context.Context, cs fwk.CycleState, pod *v1
 	return nil
 }
 
-// Unreserve clears assumed PV and PVC cache.
-// It's idempotent, and does nothing if no cache found for the given pod.
+// Unreserve 清除假定绑定的 PV 和 PVC 缓存。
+// 它是幂等的，如果没有找到对应缓存则什么都不做。
 func (pl *VolumeBinding) Unreserve(ctx context.Context, cs fwk.CycleState, pod *v1.Pod, nodeName string) {
 	s, err := getStateData(cs)
 	if err != nil {
 		return
 	}
-	// we don't need to hold the lock as only one node may be unreserved
+	// 给定 Pod 只会 unreserve 一个节点，因此无需加锁。
 	podVolumes, ok := s.podVolumesByNode[nodeName]
 	if !ok {
 		return
@@ -595,7 +620,8 @@ func (pl *VolumeBinding) Unreserve(ctx context.Context, cs fwk.CycleState, pod *
 	pl.Binder.RevertAssumedPodVolumes(podVolumes)
 }
 
-// New initializes a new plugin and returns it.
+// New 初始化并返回一个新的 volumeBinding 插件实例。
+// 该函数创建 informer、VolumeBinder、以及可选的容量评分函数。
 func New(ctx context.Context, plArgs runtime.Object, fh fwk.Handle, fts feature.Features) (fwk.Plugin, error) {
 	args, ok := plArgs.(*config.VolumeBindingArgs)
 	if !ok {
@@ -616,17 +642,25 @@ func New(ctx context.Context, plArgs runtime.Object, fh fwk.Handle, fts feature.
 	if options.ServerOpts.EnableCSIStorage {
 		capacityCheck = &CapacityCheck{
 			CSIDriverInformer: fh.SharedInformerFactory().Storage().V1().CSIDrivers(),
-			// The API version of CSIStorageCapacity before k8s 1.27 is v1beta1, so volcano has to change the client version
-			// to v1beta1 here to be compatible with the old version
+			// k8s 1.27 之前的 CSIStorageCapacity API 版本为 v1beta1，
+			// 因此 Volcano 在这里使用 v1beta1 客户端以保持对旧版本的兼容。
 			CSIStorageCapacityInformer: fh.SharedInformerFactory().Storage().V1beta1().CSIStorageCapacities(),
 		}
 	}
-	binder, err := NewVolumeBinder(klog.FromContext(ctx), fh.ClientSet(), fts, podInformer, nodeInformer, csiNodeInformer, pvcInformer, pvInformer, storageClassInformer, capacityCheck, time.Duration(args.BindTimeoutSeconds)*time.Second)
+	binder, err := NewVolumeBinder(
+		klog.FromContext(ctx),
+		fh.ClientSet(),
+		fts,
+		podInformer,
+		nodeInformer,
+		csiNodeInformer,
+		pvcInformer,
+		pvInformer, storageClassInformer, capacityCheck, time.Duration(args.BindTimeoutSeconds)*time.Second)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build volume binder: %w", err)
 	}
 
-	// build score function
+	// 构建评分函数。
 	var scorer volumeCapacityScorer
 	if fts.EnableStorageCapacityScoring {
 		shape := make(helper.FunctionShape, 0, len(args.Shape))
@@ -647,7 +681,8 @@ func New(ctx context.Context, plArgs runtime.Object, fh fwk.Handle, fts feature.
 	}, nil
 }
 
-// PreBindPreFlight is called before PreBind. it checks if the pod has volumes to be bound
+// PreBindPreFlight 在 PreBind 之前被调用，检查 Pod 是否有需要绑定的卷。
+// 如果所有卷都已绑定，则返回 Skip；如果找不到对应节点的卷方案，则返回错误。
 func (pl *VolumeBinding) PreBindPreFlight(ctx context.Context, cs fwk.CycleState, pod *v1.Pod, nodeName string) *fwk.Status {
 	s, err := getStateData(cs)
 	if err != nil {

@@ -556,7 +556,6 @@ func (ssn *Session) JobStarving(obj interface{}) bool {
 			return true
 		}
 	}
-
 	return false
 }
 
@@ -1160,6 +1159,16 @@ func (ssn *Session) HyperNodeGradientForSubJobFn(subJob *api.SubJobInfo, hyperNo
 //     jobs with JobOrderCompareFn and use !ssn.TaskOrderFn as a tie-break.
 //  4. If victims are in different queues and preemptor job exists, use
 //     ssn.VictimQueueOrderFn.
+/*
+	BuildVictimsPriorityQueue 返回一个 victim 优先队列，排序规则如下：
+	1. 如果 victim 属于同一个 job，则使用 !ssn.TaskOrderFn。
+	2. 如果 victim 的 job 缺失，则先驱逐孤儿任务；如果两个 job 都缺失，则使用 !ssn.TaskOrderFn。
+	3. 如果如果 preemptor 的 Job不存在 或者 victim 两个 job 在同一个 queue中：
+		就比较 Job 顺序，再用 Task 顺序做 tie-break。
+	4. 如果 victim 在不同 queue，且 preemptor job 存在就使用 ssn.VictimQueueOrderFn。
+	======> 这个逻辑体现了：不同队列之间的 victim 排序，要结合 preemptor 所在 queue 的策略来决定
+*/
+
 func (ssn *Session) BuildVictimsPriorityQueue(victims []*api.TaskInfo, preemptor *api.TaskInfo) *util.PriorityQueue {
 	jobThenTaskOrder := func(lvJob, rvJob *api.JobInfo, l, r interface{}) bool {
 		if cmp := ssn.JobOrderCompareFn(lvJob, rvJob); cmp != 0 {

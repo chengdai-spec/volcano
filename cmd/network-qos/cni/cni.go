@@ -83,6 +83,43 @@ func PluginMain() error {
 	return nil
 }
 
+/*
+	{
+	  "cniVersion": "1.0.0",
+	  "name": "k8s-pod-network",
+	  "type": "volcano-network-qos",
+	  "args": {
+	    "node_colocation_enable": "true",
+	    "online_bandwidth_watermark": "104857600",
+	    "offline_low_bandwidth": "5242880",
+	    "offline_high_bandwidth": "20971520",
+	    "network_qos_check_interval": "1000"
+	  },
+	  "prevResult": {
+	    "cniVersion": "1.0.0",
+	    "interfaces": [
+	      {
+	        "name": "eth0",
+	        "sandbox": "/proc/12345/ns/net"
+	      }
+	    ],
+	    "ips": [
+	      {
+	        "version": "4",
+	        "address": "10.244.1.23/32",
+	        "gateway": "10.244.1.1"
+	      }
+	    ],
+	    "routes": [
+	      {
+	        "dst": "0.0.0.0/0",
+	        "gw": "10.244.1.1"
+	      }
+	    ],
+	    "dns": {}
+	  }
+	}
+*/
 func cmdAdd(args *skel.CmdArgs) (err error) {
 	klog.InfoS("CNI add request received", "containerID", args.ContainerID,
 		"netns", args.Netns, "ifName", args.IfName, "args", args.Args, "path", args.Path, "stdinData", args.StdinData)

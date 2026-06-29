@@ -1,19 +1,3 @@
-/*
-Copyright 2025 The Volcano Authors.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
-
 package api
 
 import (
@@ -23,20 +7,31 @@ import (
 	nodeshardv1alpha1 "volcano.sh/apis/pkg/apis/shard/v1alpha1"
 )
 
-// ShardID is UID type, serves as unique ID for each queue
+// ShardID 是基于 UID 的类型，用作每个 shard 的唯一标识
 type ShardID types.UID
 
-// NodeShardInfo will have all details about node shard
+// NodeShardInfo 保存一个节点分片（node shard）的完整信息
 type NodeShardInfo struct {
-	Name         string
-	NodeDesired  sets.Set[string]
-	NodeInUse    sets.Set[string]
+	// 分片名称
+	Name string
+
+	// 该 shard 期望拥有的节点集合（来自 spec.nodesDesired）
+	NodeDesired sets.Set[string]
+
+	// 该 shard 当前正在使用的节点集合（来自 status.nodesInUse）
+	NodeInUse sets.Set[string]
+
+	// 需要从该 shard 中移除的节点集合
 	NodeToRemove sets.Set[string]
-	NodeToAdd    sets.Set[string]
-	NodeShard    *nodeshardv1alpha1.NodeShard
+
+	// 需要加入该 shard 的节点集合
+	NodeToAdd sets.Set[string]
+
+	// 原始的 NodeShard CRD 对象
+	NodeShard *nodeshardv1alpha1.NodeShard
 }
 
-// NewNodeShardInfo creates new NodeShardInfo object
+// NewNodeShardInfo 用于创建一个新的 NodeShardInfo 对象
 func NewNodeShardInfo(shard *nodeshardv1alpha1.NodeShard) *NodeShardInfo {
 	shardInfo := &NodeShardInfo{
 		Name:         shard.Name,
@@ -47,14 +42,16 @@ func NewNodeShardInfo(shard *nodeshardv1alpha1.NodeShard) *NodeShardInfo {
 		NodeShard:    shard,
 	}
 
-	//NodesToRemove and NodesToAdd in status may have delay, e.g. scheduler update NodesToRemove/NodesToAdd based on old NodesDesired
-	//so calculate based on NodesDesired and NodesInUse
+	// status 中的 NodesToRemove 和 NodesToAdd 可能存在延迟，
+	// 例如 scheduler 可能是基于旧的 NodesDesired 去更新它们，
+	// 所以这里重新根据 NodesDesired 和 NodesInUse 计算一次
 	shardInfo.NodeToRemove = shardInfo.NodeInUse.Difference(shardInfo.NodeDesired)
 	shardInfo.NodeToAdd = shardInfo.NodeDesired.Difference(shardInfo.NodeInUse)
+
 	return shardInfo
 }
 
-// Clone is used to clone nodeShardIndo object
+// Clone 用于复制一个 NodeShardInfo 对象
 func (ns *NodeShardInfo) Clone() *NodeShardInfo {
 	return &NodeShardInfo{
 		Name:         ns.Name,

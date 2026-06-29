@@ -135,9 +135,7 @@ func (q queueGroupAffinity) predicate(group string) error {
 	if q.queueGroupAffinityPreferred.Has(group) {
 		flag = true
 	}
-	// AntiAffinity: hard constraints should be checked first
-	// to make sure soft constraints satisfy
-	// and antiAffinity's priority is higher than affinity
+	// 反亲和(AntiAffinity)规则应先检查硬约束，以保证软约束满足；同时，反亲和的优先级高于亲和规则
 	if q.queueGroupAntiAffinityRequired.Has(group) {
 		flag = false
 	}
@@ -152,9 +150,9 @@ func (q queueGroupAffinity) predicate(group string) error {
 
 func (q queueGroupAffinity) score(group string, enablePreferredOrder bool) float64 {
 	nodeScore := 0.0
-	// Affinity: hard constraints should be checked first
-	// to make sure soft constraints can cover score.
-	// And same to predict, antiAffinity's priority is higher than affinity
+	// 亲和（Affinity）：应优先检查硬约束，
+	// 以确保软约束可以覆盖评分。
+	// 同时，在预测过程中，反亲和（AntiAffinity）的优先级高于亲和（Affinity）。
 	if q.queueGroupAffinityRequired.Has(group) {
 		nodeScore += BaseScore
 	}

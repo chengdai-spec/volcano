@@ -138,18 +138,28 @@ type ValidateResult struct {
 const (
 	// Success means that plugin ran correctly and found pod schedulable.
 	// NOTE: A nil status is also considered as "Success".
+	// 插件检查后，觉得这个 Pod 没问题，可以继续后续调度流程
 	Success int = iota
 	// Error is used for internal plugin errors, unexpected input, etc.
+	// 插件检查后，觉得这个 Pod 有问题，插件内部错误，或者输入错误等
 	Error
+	// 插件检查后，觉得这个 Pod 有问题，插件内部错误，或者输入错误等，插件检查失败
 	// Unschedulable is used when a plugin finds a pod unschedulable. The scheduler might attempt to
 	// preempt other pods to get this pod scheduled. Use UnschedulableAndUnresolvable to make the
 	// scheduler skip preemption.
-	// The accompanying status message should explain why the pod is unschedulable.
+
+	/*
+		当前不行，但可能可通过抢占解决
+
+	*/
 	Unschedulable
 	// UnschedulableAndUnresolvable is used when a plugin finds a pod unschedulable and
 	// preemption would not change anything. Plugins should return Unschedulable if it is possible
 	// that the pod can get scheduled with preemption.
 	// The accompanying status message should explain why the pod is unschedulable.
+	/*
+		抢占也没用
+	*/
 	UnschedulableAndUnresolvable
 	// Wait is used when a Permit plugin finds a pod scheduling should wait.
 	Wait
@@ -158,6 +168,7 @@ const (
 	// There is a Pending status in k8s.
 	// Pending means that the scheduling process is finished successfully,
 	// but the plugin wants to stop the scheduling cycle/binding cycle here.
+	//Pending
 )
 
 type Status struct {
