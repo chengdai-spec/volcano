@@ -50,13 +50,13 @@ type GPUDevice struct {
 	// memory per card
 	Memory uint
 	// max sharing number
-	Number uint
+	Number uint // 这块 GPU 最多能共享给几个 Pod 使用（最大槽位数）
 	// type of this number
 	Type string
 	// Health condition of this GPU
 	Health bool
 	// number of allocated
-	UsedNum uint
+	UsedNum uint // 当前已经被几个 Pod 占用了
 	// number of device memory allocated
 	UsedMem uint
 	// number of core used
