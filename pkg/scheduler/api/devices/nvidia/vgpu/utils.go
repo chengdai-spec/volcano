@@ -36,6 +36,22 @@ import (
 	"volcano.sh/volcano/pkg/scheduler/api/devices/config"
 )
 
+// extractGeometryFromType 从 GPU 型号中提取 MIG 几何形状配置
+//
+// MIG (Multi-Instance GPU) 允许将一块物理 GPU 切分为多个独立实例。
+// 不同的 GPU 型号支持不同的切分几何形状。
+//
+// 参数：
+//   - t: GPU 型号字符串（如 "Tesla-A100-SXM4-40GB"）
+//
+// 返回值：
+//   - []config.Geometry: 支持的几何形状列表
+//   - error: 如果找不到对应的几何配置则返回错误
+//
+// 工作流程：
+// 1. 从全局配置中读取 NvidiaConfig.MigGeometriesList
+// 2. 遍历所有支持的 GPU 型号，查找匹配的型号
+// 3. 返回该型号支持的几何形状列表
 func extractGeometryFromType(t string) ([]config.Geometry, error) {
 	if config.GetConfig() != nil {
 		for _, val := range config.GetConfig().NvidiaConfig.MigGeometriesList {
@@ -53,6 +69,26 @@ func extractGeometryFromType(t string) ([]config.Geometry, error) {
 	return []config.Geometry{}, errors.New("mig type not found")
 }
 
+// decodeNodeDevices 从节点注解字符串中解码 GPU 设备信息
+//
+// 节点注解格式示例：
+// "UUID0,count,memory,type,health,mode:UUID1,count,memory,type,health,mode:..."
+//
+// 参数：
+//   - name: 节点名称
+//   - str: 设备信息字符串（来自节点注解）
+//
+// 返回值：
+//   - *GPUDevices: 解析后的 GPU 设备对象
+//   - string: 共享模式（hami-core 或 MIG）
+//
+// 每个 GPU 设备的字段含义：
+//   - items[0]: UUID（GPU 唯一标识）
+//   - items[1]: count（总虚拟 GPU 数量）
+//   - items[2]: memory（显存大小，单位 MB）
+//   - items[3]: type（GPU 型号）
+//   - items[4]: health（健康状态，true/false）
+//   - items[5]: mode（共享模式：hami-core 或 MIG）
 func decodeNodeDevices(name, str string) (*GPUDevices, string) {
 	if !strings.Contains(str, ":") {
 		return nil, ""
@@ -63,7 +99,10 @@ func decodeNodeDevices(name, str string) (*GPUDevices, string) {
 		Device: make(map[int]*GPUDevice),
 		Score:  float64(0),
 	}
+
+	// 默认使用 hami-core 作为分区模式
 	sharingMode := vGPUControllerHAMICore
+
 	for index, val := range tmp {
 		if strings.Contains(val, ",") {
 			items := strings.Split(val, ",")
@@ -71,27 +110,33 @@ func decodeNodeDevices(name, str string) (*GPUDevices, string) {
 				klog.Error("wrong Node GPU info: ", val)
 				return nil, ""
 			}
+
 			count, _ := strconv.Atoi(items[1])
 			devmem, _ := strconv.Atoi(items[2])
 			health, _ := strconv.ParseBool(items[4])
+
 			i := GPUDevice{
 				ID:          index,
 				Node:        name,
 				UUID:        items[0],
-				Number:      uint(count),
-				Memory:      uint(devmem),
-				Type:        items[3],
-				PodMap:      make(map[string]*GPUUsage),
-				Health:      health,
-				MigTemplate: []config.Geometry{},
+				Number:      uint(count),                // 总虚拟 GPU 槽位数
+				Memory:      uint(devmem),               // 显存总量
+				Type:        items[3],                   // GPU 型号
+				PodMap:      make(map[string]*GPUUsage), // Pod 使用情况映射
+				Health:      health,                     // 健康状态
+				MigTemplate: []config.Geometry{},        // MIG 模板（仅 MIG 模式使用）
 				MigUsage: config.MigInUse{
-					Index: -1},
+					Index: -1}, // MIG 使用索引，-1 表示未使用 MIG
 			}
+
+			// 确定共享模式
 			sharingMode = getSharingMode(items[5])
 			if sharingMode == vGPUControllerMIG {
 				var err error
+				// 如果是 MIG 模式，需要提取几何形状配置
 				i.MigTemplate, err = extractGeometryFromType(i.Type)
 				if err != nil {
+					// 如果提取失败，降级到 hami-core 模式
 					sharingMode = vGPUControllerHAMICore
 					klog.ErrorS(err, "extract mig geometry error and fall back to hamicore mode")
 				}
@@ -103,6 +148,13 @@ func decodeNodeDevices(name, str string) (*GPUDevices, string) {
 	return retval, sharingMode
 }
 
+// encodeContainerDevices 将容器设备列表编码为字符串
+//
+// 编码格式：
+// "UUID,type,usedmem,usedcores:UUID,type,usedmem,usedcores:..."
+//
+// 用于将分配结果写入 Pod 注解，例如：
+// vgpu-ids-new: "uuid1,NVIDIA,2048,50:uuid2,NVIDIA,1024,25"
 func encodeContainerDevices(cd []ContainerDevice) string {
 	tmp := ""
 	for _, val := range cd {
@@ -110,9 +162,13 @@ func encodeContainerDevices(cd []ContainerDevice) string {
 	}
 	klog.V(4).Infoln("Encoded container Devices=", tmp)
 	return tmp
-	//return strings.Join(cd, ",")
 }
 
+// encodePodDevices 将整个 Pod 的设备分配编码为字符串
+//
+// 格式：
+// "container1_devices;container2_devices;..."
+// 其中每个 container 的设备用 encodeContainerDevices 编码
 func encodePodDevices(pd []ContainerDevices) string {
 	var ss []string
 	for _, cd := range pd {
@@ -121,6 +177,13 @@ func encodePodDevices(pd []ContainerDevices) string {
 	return strings.Join(ss, ";")
 }
 
+// decodeContainerDevices 从容器的设备字符串中解码出设备列表
+//
+// 参数：
+//   - str: 设备字符串，格式为 "UUID,type,usedmem,usedcores:..."
+//
+// 返回值：
+//   - ContainerDevices: 解析后的设备列表
 func decodeContainerDevices(str string) ContainerDevices {
 	if len(str) == 0 {
 		return ContainerDevices{}
@@ -146,7 +209,17 @@ func decodeContainerDevices(str string) ContainerDevices {
 	return contdev
 }
 
-// DecodePodDevices parses the vgpu-ids-new annotation into per-container device lists.
+// DecodePodDevices 解析 Pod 的 vgpu-ids-new 注解为每个容器的设备列表
+//
+// 参数：
+//   - str: Pod 注解字符串，格式为 "container1;container2;..."
+//
+// 返回值：
+//   - []ContainerDevices: 每个容器的设备列表
+//
+// 典型用途：
+// - 在调度周期开始时，从已调度 Pod 的注解中恢复设备分配状态
+// - 用于构建 GPUDevice.PodMap，追踪哪些 Pod 使用了哪些 GPU
 func DecodePodDevices(str string) []ContainerDevices {
 	if len(str) == 0 {
 		return []ContainerDevices{}
@@ -159,10 +232,21 @@ func DecodePodDevices(str string) []ContainerDevices {
 	return pd
 }
 
-// getPodGroupKey returns a unique key for the pod's group (namespace/name of PodGroup),
-// or "" if the pod has no group annotation. Used to avoid placing two pods from the same
-// PodGroup on the same vGPU device. Uses the same annotation keys as the job/podgroup
-// controllers (KubeGroupNameAnnotationKey and VolcanoGroupNameAnnotationKey).
+// getPodGroupKey 获取 Pod 所属的作业组唯一标识
+//
+// 参数：
+//   - pod: Pod 对象
+//
+// 返回值：
+//   - string: 作业组键（namespace/groupName），如果没有组注解则返回空字符串
+//
+// 作业组用于实现 PodGroup Spread 策略：
+// - 同一作业的多个 Pod 应该分散到不同的 GPU 上
+// - 避免单点故障导致整个作业失败
+//
+// 优先级：
+// 1. KubeGroupNameAnnotationKey（KubeVela 等使用的标准注解）
+// 2. VolcanoGroupNameAnnotationKey（Volcano 专有注解）
 func getPodGroupKey(pod *v1.Pod) string {
 	if pod == nil || pod.Annotations == nil {
 		return ""
@@ -177,9 +261,19 @@ func getPodGroupKey(pod *v1.Pod) string {
 	return pod.Namespace + "/" + groupName
 }
 
-// deviceHasPodFromSameGroup returns true if the device already has a pod from the same
-// PodGroup as currentKey (and that pod has non-zero usage), so we should not place
-// another pod from the same group on this device.
+// deviceHasPodFromSameGroup 检查设备是否已有来自同一 PodGroup 的 Pod
+//
+// 参数：
+//   - gd: GPU 设备对象
+//   - currentKey: 当前 Pod 的 PodGroup key
+//
+// 返回值：
+//   - bool: 如果设备已有同组 Pod 且使用了资源，返回 true
+//
+// 用途：
+// - 实现 PodGroup Spread 策略
+// - 防止同一作业的多个 Pod 挤在同一块 GPU 上
+// - 提高作业的容错性和性能隔离
 func deviceHasPodFromSameGroup(gd *GPUDevice, currentKey string) bool {
 	if gd == nil || currentKey == "" {
 		return false
@@ -188,6 +282,7 @@ func deviceHasPodFromSameGroup(gd *GPUDevice, currentKey string) bool {
 		if usage == nil {
 			continue
 		}
+		// 只有当同组 Pod 实际使用了资源时才认为冲突
 		if usage.PodGroupKey == currentKey && (usage.UsedMem > 0 || usage.UsedCore > 0) {
 			return true
 		}
@@ -195,6 +290,17 @@ func deviceHasPodFromSameGroup(gd *GPUDevice, currentKey string) bool {
 	return false
 }
 
+// checkVGPUResourcesInPod 检查 Pod 是否请求了 vGPU 资源
+//
+// 参数：
+//   - pod: Pod 对象
+//
+// 返回值：
+//   - bool: 如果 Pod 请求了 GPU 内存或 GPU 数量，返回 true
+//
+// 用途：
+// - 快速判断 Pod 是否需要 GPU 调度
+// - 避免对不需要 GPU 的 Pod 执行不必要的检查
 func checkVGPUResourcesInPod(pod *v1.Pod) bool {
 	for _, container := range pod.Spec.Containers {
 		_, ok := container.Resources.Limits[v1.ResourceName(getConfig().ResourceMemoryName)]
@@ -209,6 +315,16 @@ func checkVGPUResourcesInPod(pod *v1.Pod) bool {
 	return false
 }
 
+// resourcereqs 提取 Pod 的 GPU 资源请求
+//
+// 参数：
+//   - pod: Pod 对象
+//
+// 返回值：
+//   - []devices.ContainerDeviceRequest: 每个容器的设备请求
+//
+// 这个函数是 devices.ExtractResourceRequest 的包装器，
+// 自动从配置中读取资源名称（如 nvidia.com/gpu、nvidia.com/gpumem 等）。
 func resourcereqs(pod *v1.Pod) []devices.ContainerDeviceRequest {
 	countName := getConfig().ResourceCountName
 	memoryName := getConfig().ResourceMemoryName
@@ -217,14 +333,34 @@ func resourcereqs(pod *v1.Pod) []devices.ContainerDeviceRequest {
 	return devices.ExtractResourceRequest(pod, "NVIDIA", countName, memoryName, percentageName, coreName)
 }
 
+// checkGPUtype 检查 GPU 型号是否符合 Pod 注解中的过滤条件
+//
+// 参数：
+//   - annos: Pod 注解
+//   - cardtype: GPU 卡型号（如 "Tesla-V100-SXM2-16GB"）
+//
+// 返回值：
+//   - bool: 如果型号符合要求，返回 true
+//
+// 支持的注解：
+// - volcano.sh/gpu-use: 指定要使用的 GPU 型号（白名单）
+// - volcano.sh/gpu-no-use: 指定要排除的 GPU 型号（黑名单）
+//
+// 示例：
+//
+//	volcano.sh/gpu-use: "V100,A100"  # 只使用 V100 或 A100
+//	volcano.sh/gpu-no-use: "T4"      # 不使用 T4
 func checkGPUtype(annos map[string]string, cardtype string) bool {
 	inuse, ok := annos[GPUInUse]
 	if ok {
+		// 白名单模式：只允许指定型号
 		if !strings.Contains(inuse, ",") {
+			// 单个型号
 			if strings.Contains(strings.ToUpper(cardtype), strings.ToUpper(inuse)) {
 				return true
 			}
 		} else {
+			// 多个型号，用逗号分隔
 			for _, val := range strings.Split(inuse, ",") {
 				if strings.Contains(strings.ToUpper(cardtype), strings.ToUpper(val)) {
 					return true
@@ -233,13 +369,17 @@ func checkGPUtype(annos map[string]string, cardtype string) bool {
 		}
 		return false
 	}
+
 	nouse, ok := annos[GPUNoUse]
 	if ok {
+		// 黑名单模式：排除指定型号
 		if !strings.Contains(nouse, ",") {
+			// 单个型号
 			if strings.Contains(strings.ToUpper(cardtype), strings.ToUpper(nouse)) {
 				return false
 			}
 		} else {
+			// 多个型号
 			for _, val := range strings.Split(nouse, ",") {
 				if strings.Contains(strings.ToUpper(cardtype), strings.ToUpper(val)) {
 					return false
@@ -251,8 +391,21 @@ func checkGPUtype(annos map[string]string, cardtype string) bool {
 	return true
 }
 
+// checkType 检查设备类型是否与 Pod 请求匹配
+//
+// 参数：
+//   - annos: Pod 注解
+//   - d: GPU 设备
+//   - n: 容器设备请求
+//
+// 返回值：
+//   - bool: 如果类型匹配，返回 true
+//
+// 检查逻辑：
+// 1. 通用类型检查：NVIDIA->NVIDIA, MLU->MLU
+// 2. 对于 NVIDIA GPU，进一步检查型号过滤（白名单/黑名单）
 func checkType(annos map[string]string, d GPUDevice, n devices.ContainerDeviceRequest) bool {
-	//General type check, NVIDIA->NVIDIA MLU->MLU
+	// General type check, NVIDIA->NVIDIA MLU->MLU
 	if !strings.Contains(d.Type, n.Type) {
 		return false
 	}
@@ -263,7 +416,22 @@ func checkType(annos map[string]string, d GPUDevice, n devices.ContainerDeviceRe
 	return false
 }
 
-// getGPUDeviceSnapShot is not a strict deep copy, the pointer item is same with origin.
+// getGPUDeviceSnapShot 创建 GPU 设备的快照（浅拷贝）
+//
+// 参数：
+//   - snap: 原始 GPUDevices 对象
+//
+// 返回值：
+//   - *GPUDevices: 快照副本
+//
+// 注意：
+// - 这不是严格的深拷贝，指针类型的字段（如 MigTemplate）仍指向原对象
+// - PodMap 会被深拷贝，避免修改影响原始数据
+// - 用于 dry-run 模拟分配，不影响真实状态
+//
+// 用途：
+// - 在 Predicate 阶段尝试分配，看看是否可行
+// - 如果失败可以丢弃快照，不影响原始状态
 func getGPUDeviceSnapShot(snap *GPUDevices) *GPUDevices {
 	ret := GPUDevices{
 		Name:    snap.Name,
@@ -273,6 +441,7 @@ func getGPUDeviceSnapShot(snap *GPUDevices) *GPUDevices {
 	}
 	for index, val := range snap.Device {
 		if val != nil {
+			// 深拷贝 PodMap
 			podMapCopy := make(map[string]*GPUUsage, len(val.PodMap))
 			for uid, usage := range val.PodMap {
 				if usage != nil {
@@ -295,6 +464,7 @@ func getGPUDeviceSnapShot(snap *GPUDevices) *GPUDevices {
 				MigTemplate: val.MigTemplate,
 				MigUsage:    val.MigUsage,
 			}
+			// 深拷贝 MIG 使用状态
 			ret.Device[index].MigUsage = deepCopyMigInUse(val.MigUsage)
 			klog.V(4).Infoln("getGPUDeviceSnapShot:", ret.Device[index].UsedMem, val.UsedMem, ret.Device[index].MigUsage, val.MigUsage)
 		}
@@ -302,6 +472,10 @@ func getGPUDeviceSnapShot(snap *GPUDevices) *GPUDevices {
 	return &ret
 }
 
+// deepCopyMigInUse 深拷贝 MIG 使用状态
+//
+// MIG (Multi-Instance GPU) 允许将 GPU 切分为多个实例。
+// 这个函数复制 MIG 实例的使用情况，避免修改影响原始数据。
 func deepCopyMigInUse(src config.MigInUse) config.MigInUse {
 	dst := config.MigInUse{
 		Index: src.Index,
@@ -321,7 +495,18 @@ func deepCopyMigInUse(src config.MigInUse) config.MigInUse {
 	return dst
 }
 
-// getSharingMode by default, we use hami core as the partitioning mode
+// getSharingMode 根据模式字符串确定共享模式
+//
+// 参数：
+//   - mode: 模式字符串（如 "MIG" 或其他）
+//
+// 返回值：
+//   - string: 确定的共享模式
+//
+// 默认情况下使用 hami-core 作为分区模式。
+// 目前支持的模式：
+// - vGPUControllerMIG: NVIDIA MIG 硬件级虚拟化
+// - vGPUControllerHAMICore: HAMi 软件级时间切片
 func getSharingMode(mode string) string {
 	switch mode {
 	case vGPUControllerMIG:
@@ -331,7 +516,28 @@ func getSharingMode(mode string) string {
 	}
 }
 
-// checkNodeGPUSharingPredicate checks if a pod with gpu requirement can be scheduled on a node.
+// checkNodeGPUSharingPredicateAndScore 检查 Pod 是否可以调度到节点并计算分数
+//
+// 这是 vGPU 调度的核心函数，实现了完整的 GPU 共享调度逻辑。
+//
+// 参数：
+//   - pod: 要调度的 Pod
+//   - gssnap: GPU 设备快照（replicate=true 时传入快照）
+//   - replicate: 是否为干跑模式（true=模拟分配，false=真实分配）
+//   - schedulePolicy: 调度策略（binpack 或 spread）
+//
+// 返回值：
+//   - bool: 是否可以调度
+//   - []ContainerDevices: 分配的设备列表
+//   - float64: 节点分数
+//   - error: 错误信息
+//
+// 工作流程：
+// 1. 检查 Pod 是否请求了 vGPU 资源
+// 2. 验证 Pod 要求的共享模式是否与节点一致
+// 3. 提取 Pod 的资源请求
+// 4. 遍历每个容器的请求，尝试分配到合适的 GPU
+// 5. 如果所有请求都满足，返回成功和分配结果
 func checkNodeGPUSharingPredicateAndScore(pod *v1.Pod, gssnap *GPUDevices, replicate bool, schedulePolicy string) (bool, []ContainerDevices, float64, error) {
 	// no gpu sharing request
 	score := float64(0)
@@ -339,8 +545,8 @@ func checkNodeGPUSharingPredicateAndScore(pod *v1.Pod, gssnap *GPUDevices, repli
 		return true, []ContainerDevices{}, 0, nil
 	}
 
-	// if the pod specify the sharing mode but the device is not in the same mode, return not fitted;
-	// if the pod does not speficy the sharing mode, any device mode will be fitted
+	// 如果 Pod 指定了共享模式但设备不是该模式，返回不匹配
+	// 如果 Pod 没有指定模式，任何设备模式都可以
 	podSharingMode, ok := pod.Annotations[GPUModeAnnotation]
 	if ok && podSharingMode != gssnap.Mode {
 		return false, []ContainerDevices{}, 0, fmt.Errorf("pod required sharing mode %s is not the same as the node mode %s", podSharingMode, gssnap.Mode)
@@ -353,20 +559,27 @@ func checkNodeGPUSharingPredicateAndScore(pod *v1.Pod, gssnap *GPUDevices, repli
 
 	var gs *GPUDevices
 	if replicate {
+		// 干跑模式：使用快照，不影响真实状态
 		gs = getGPUDeviceSnapShot(gssnap)
 	} else {
+		// 真实分配：直接操作原对象
 		gs = gssnap
 	}
+
 	var currentPodGroupKey string
+	// 如果 Pod 启用了 Spread 策略，获取其 PodGroup key
 	if pod.Annotations[VGPUPodGroupPolicyAnnotation] == VGPUPodGroupPolicySpreadValue {
 		currentPodGroupKey = getPodGroupKey(pod)
 	}
 
+	// tentativeAlloc 记录临时分配，用于失败时回滚
 	type tentativeAlloc struct {
 		device *GPUDevice
 		mem    uint
 		core   uint
 	}
+
+	// rollbackTentative 回滚临时分配
 	rollbackTentative := func(allocs []tentativeAlloc) {
 		for _, alloc := range allocs {
 			if alloc.device == nil {
@@ -390,60 +603,82 @@ func checkNodeGPUSharingPredicateAndScore(pod *v1.Pod, gssnap *GPUDevices, repli
 
 	tentativeAllocs := []tentativeAlloc{}
 	ctrdevs := []ContainerDevices{}
+
+	// 遍历每个容器的资源请求
 	for _, val := range ctrReq {
 		devs := []ContainerDevice{}
 		if int(val.Nums) > len(gs.Device) {
+			// 请求的设备数量超过节点上的 GPU 总数
 			rollbackTentative(tentativeAllocs)
 			return false, []ContainerDevices{}, 0, fmt.Errorf("no enough gpu cards on node %s", gs.Name)
 		}
 		klog.V(3).InfoS("Allocating device for container", "request", val)
 
+		// 根据调度策略排序 GPU 设备索引
 		for _, i := range sortedDeviceIndicesByPolicy(gs, schedulePolicy) {
 			klog.V(3).InfoS("Scoring pod request", "memReq", val.Memreq, "memPercentageReq", val.MemPercentagereq, "coresReq", val.Coresreq, "Nums", val.Nums, "Index", i, "ID", gs.Device[i].ID)
 			klog.V(3).InfoS("Current Device", "Index", i, "TotalMemory", gs.Device[i].Memory, "UsedMemory", gs.Device[i].UsedMem, "UsedCores", gs.Device[i].UsedCore, "UsedNum", gs.Device[i].UsedNum, "Number", gs.Device[i].Number, "replicate", replicate)
+
+			// 检查 1：GPU 是否还有空闲槽位
 			if gs.Device[i].Number <= uint(gs.Device[i].UsedNum) {
 				continue
 			}
+
+			// 检查 2：PodGroup Spread 策略 - 避免同组 Pod 在同一 GPU
 			if currentPodGroupKey != "" && deviceHasPodFromSameGroup(gs.Device[i], currentPodGroupKey) {
 				continue
 			}
+
+			// 计算内存需求
 			memreqForCard := uint(0)
-			// if we have mempercentage request, we ignore the mem request for every cards
+			// 如果有内存百分比请求，忽略绝对内存请求
 			if val.MemPercentagereq != 101 {
 				memreqForCard = uint(float64(gs.Device[i].Memory) * float64(val.MemPercentagereq) / 100.0)
 			} else {
 				memreqForCard = uint(val.Memreq)
 			}
+
+			// 检查 3：剩余显存是否足够
 			if int(gs.Device[i].Memory)-int(gs.Device[i].UsedMem) < int(memreqForCard) {
 				continue
 			}
+
+			// 检查 4：核心数是否超限
 			if gs.Device[i].UsedCore+uint(val.Coresreq) > 100 {
 				continue
 			}
-			// Coresreq=100 indicates it want this card exclusively
+
+			// 检查 5：Coresreq=100 表示独占整卡
 			if val.Coresreq == 100 && gs.Device[i].UsedNum > 0 {
 				continue
 			}
-			// You can't allocate core=0 job to an already full GPU
+
+			// 检查 6：不能将 core=0 的任务分配给已满的 GPU
 			if gs.Device[i].UsedCore == 100 && val.Coresreq == 0 {
 				continue
 			}
+
+			// 检查 7：GPU 型号是否匹配
 			if !checkType(pod.Annotations, *gs.Device[i], val) {
 				klog.Errorln("failed checktype", gs.Device[i].Type, val.Type)
 				continue
 			}
+
+			// 尝试添加 Pod 到设备（由 Sharing 策略决定是否可以共享）
 			fit, uuid := gs.Sharing.TryAddPod(gs.Device[i], memreqForCard, uint(val.Coresreq))
 			if !fit {
 				klog.V(3).Info(gs.Device[i].ID, "not fit")
 				continue
 			}
+
+			// 记录临时分配
 			tentativeAllocs = append(tentativeAllocs, tentativeAlloc{
 				device: gs.Device[i],
 				mem:    memreqForCard,
 				core:   uint(val.Coresreq),
 			})
-			//total += gs.Devices[i].Count
-			//free += node.Devices[i].Count - node.Devices[i].Used
+
+			// 如果还需要更多设备，继续分配
 			if val.Nums > 0 {
 				val.Nums--
 				klog.V(3).Info("fitted uuid: ", uuid)
@@ -453,12 +688,15 @@ func checkNodeGPUSharingPredicateAndScore(pod *v1.Pod, gssnap *GPUDevices, repli
 					Usedmem:   memreqForCard,
 					Usedcores: uint(val.Coresreq),
 				})
+				// 累加节点分数
 				score += GPUScore(schedulePolicy, gs.Device[i])
 			}
 			if val.Nums == 0 {
 				break
 			}
 		}
+
+		// 如果还有未满足的请求，说明分配失败，回滚
 		if val.Nums > 0 {
 			rollbackTentative(tentativeAllocs)
 			return false, []ContainerDevices{}, 0, fmt.Errorf("not enough gpu fitted on this node")
@@ -468,6 +706,28 @@ func checkNodeGPUSharingPredicateAndScore(pod *v1.Pod, gssnap *GPUDevices, repli
 	return true, ctrdevs, score, nil
 }
 
+// sortedDeviceIndicesByPolicy 根据调度策略对 GPU 设备索引排序
+//
+// 参数：
+//   - gs: GPU 设备集合
+//   - schedulePolicy: 调度策略
+//
+// 返回值：
+//   - []int: 排序后的设备索引列表
+//
+// 支持的策略：
+// 1. binpackPolicy（紧凑策略）：
+//   - 优先选择已用显存多的 GPU
+//   - 目标：让任务集中在少数 GPU 上，留出更多空闲 GPU
+//   - 适用场景：提高资源利用率，减少碎片
+//
+// 2. spreadPolicy（分散策略）：
+//   - 优先选择已用槽位少的 GPU
+//   - 目标：让任务分散到不同 GPU 上
+//   - 适用场景：提高并行性能，减少竞争
+//
+// 3. 默认策略：
+//   - 按设备索引逆序遍历
 func sortedDeviceIndicesByPolicy(gs *GPUDevices, schedulePolicy string) []int {
 	n := len(gs.Device)
 	idx := make([]int, 0, n)
@@ -479,7 +739,7 @@ func sortedDeviceIndicesByPolicy(gs *GPUDevices, schedulePolicy string) []int {
 		sort.Slice(idx, func(a, b int) bool {
 			da, db := gs.Device[idx[a]], gs.Device[idx[b]]
 			if da.UsedMem != db.UsedMem {
-				return da.UsedMem > db.UsedMem
+				return da.UsedMem > db.UsedMem // 已用显存多的排前面
 			}
 			return idx[a] < idx[b]
 		})
@@ -490,7 +750,7 @@ func sortedDeviceIndicesByPolicy(gs *GPUDevices, schedulePolicy string) []int {
 		sort.Slice(idx, func(a, b int) bool {
 			da, db := gs.Device[idx[a]], gs.Device[idx[b]]
 			if da.UsedNum != db.UsedNum {
-				return da.UsedNum < db.UsedNum
+				return da.UsedNum < db.UsedNum // 已用槽位少的排前面
 			}
 			return idx[a] < idx[b]
 		})
@@ -502,6 +762,28 @@ func sortedDeviceIndicesByPolicy(gs *GPUDevices, schedulePolicy string) []int {
 	return idx
 }
 
+// GPUScore 计算单个 GPU 设备的分数
+//
+// 参数：
+//   - schedulePolicy: 调度策略
+//   - device: GPU 设备
+//
+// 返回值：
+//   - float64: 设备分数（越高越优先）
+//
+// 计分规则：
+// 1. binpackPolicy：
+//   - 分数 = binpackMultiplier * (已用显存 / 总显存)
+//   - 已用比例越高，分数越高
+//   - binpackMultiplier 通常为 10，放大差异
+//
+// 2. spreadPolicy：
+//   - 如果 UsedNum == 0（完全空闲），分数 = spreadMultiplier
+//   - 否则分数 = 0
+//   - spreadMultiplier 通常为 1，鼓励选择空闲 GPU
+//
+// 3. 默认策略：
+//   - 分数 = 0
 func GPUScore(schedulePolicy string, device *GPUDevice) float64 {
 	var score float64
 	switch schedulePolicy {
@@ -517,13 +799,17 @@ func GPUScore(schedulePolicy string, device *GPUDevice) float64 {
 	return score
 }
 
+// patchPodAnnotations 为 Pod 添加注解（本地版本）
+//
+// 这个函数与 devices.PatchPodAnnotations 功能相同，
+// 但这里是包内私有函数，可能是历史遗留。
+// 建议统一使用 devices 包的公共版本。
 func patchPodAnnotations(kubeClient kubernetes.Interface, pod *v1.Pod, annotations map[string]string) error {
 	type patchMetadata struct {
 		Annotations map[string]string `json:"annotations,omitempty"`
 	}
 	type patchPod struct {
 		Metadata patchMetadata `json:"metadata"`
-		//Spec     patchSpec     `json:"spec,omitempty"`
 	}
 
 	p := patchPod{}
@@ -542,6 +828,14 @@ func patchPodAnnotations(kubeClient kubernetes.Interface, pod *v1.Pod, annotatio
 	return err
 }
 
+// getConfig 获取 NVIDIA 配置
+//
+// 如果全局配置已初始化，返回全局配置；
+// 否则返回默认配置。
+//
+// 这种设计允许：
+// - 动态更新配置（通过 ConfigMap）
+// - 在配置未加载时使用安全的默认值
 func getConfig() config.NvidiaConfig {
 	if config.GetConfig() != nil {
 		return config.GetConfig().NvidiaConfig

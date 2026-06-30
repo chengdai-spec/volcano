@@ -31,7 +31,7 @@ import (
 // GPUExclusiveRulesKey 是 GPU 独占规则的配置键
 // 其值一般来自 Volcano 调度器配置参数，格式通常是一个规则列表。
 // 每条规则本质上是一个 label 选择器：
-// 只有同时满足该规则里所有 label key/value 的 Pod，才会被视为“独占组”。
+// 只有同时满足该规则里所有 label key/value 的 Pod，才会被视为"独占组"。
 const (
 	GPUExclusiveRulesKey = "deviceshare.GPUExclusiveRules"
 )
@@ -48,7 +48,9 @@ func podKey(pod *v1.Pod) string {
 //   - labels: 一组必须同时满足的标签键值对
 //
 // 例如：
-//   {"team":"a", "gpu-excl":"true"}
+//
+//	{"team":"a", "gpu-excl":"true"}
+//
 // 表示只有同时带有 team=a 和 gpu-excl=true 的 Pod 才匹配此规则。
 type exclusiveRule struct {
 	labels map[string]string
@@ -118,7 +120,7 @@ func parseExclusiveRules(raw interface{}) []exclusiveRule {
 
 // matchingRules 返回 Pod 命中的规则索引列表
 //
-// 一个 Pod 只有在“同时满足某条规则里的所有 label 条件”时，
+// 一个 Pod 只有在"同时满足某条规则里的所有 label 条件"时，
 // 才算命中该规则。
 func matchingRules(pod *v1.Pod, rules []exclusiveRule) []int {
 	if pod.Labels == nil {
@@ -155,12 +157,12 @@ func podMatchesRule(pod *v1.Pod, rule exclusiveRule) bool {
 // exclusiveGPUDevices 是对 vgpu.GPUDevices 的包装器
 //
 // 它的目标是：
-//   - 对匹配独占规则的 Pod，强制其使用“独占 GPU”
+//   - 对匹配独占规则的 Pod，强制其使用"独占 GPU"
 //   - 不让同一规则组里的 Pod 与其他同规则 Pod 共享同一块 GPU
 //   - 对不匹配规则的 Pod，完全沿用原始 GPU 设备逻辑
 //
 // 实现方式不是改写底层 allocator，而是在 FilterNode / Allocate 时
-// 临时“屏蔽”掉某些 GPU，使底层 vGPU allocator 看不到这些 GPU，
+// 临时"屏蔽"掉某些 GPU，使底层 vGPU allocator 看不到这些 GPU，
 // 从而达到独占效果。
 type exclusiveGPUDevices struct {
 	inner    *vgpu.GPUDevices // 真正执行 GPU 分配/过滤的底层设备对象
@@ -169,7 +171,7 @@ type exclusiveGPUDevices struct {
 	plugin   *deviceSharePlugin
 
 	// ruleGPUs[ruleIndex] = 该规则组已经占用/绑定的 GPU index 集合
-	// 这是“规则维度”的 GPU 归属关系
+	// 这是"规则维度"的 GPU 归属关系
 	ruleGPUs map[int]map[int]struct{}
 
 	// podRules[podKey] = 这个 Pod 命中了哪些规则
@@ -184,13 +186,13 @@ type exclusiveGPUDevices struct {
 // 编译期接口检查：exclusiveGPUDevices 必须实现 api.Devices
 var _ api.Devices = (*exclusiveGPUDevices)(nil)
 
-// reservedGPUsForPod 返回这个 Pod 需要“保留/独占”的 GPU 集合
+// reservedGPUsForPod 返回这个 Pod 需要"保留/独占"的 GPU 集合
 //
 // 规则：
 //   - 先找出这个 Pod 命中了哪些独占规则
 //   - 再把这些规则已经占用的 GPU 合并起来
 //
-// 注意：这里只保证“同规则 Pod 之间”共享隔离。
+// 注意：这里只保证"同规则 Pod 之间"共享隔离。
 // 不同规则之间是否共享，由当前实现决定（这里允许不同规则之间仍可能共享）。
 func (a *exclusiveGPUDevices) reservedGPUsForPod(pod *v1.Pod) map[int]struct{} {
 	matched := matchingRules(pod, a.cfg.rules)
@@ -209,7 +211,7 @@ func (a *exclusiveGPUDevices) reservedGPUsForPod(pod *v1.Pod) map[int]struct{} {
 	return result
 }
 
-// capGPUs 临时“屏蔽”指定 GPU
+// capGPUs 临时"屏蔽"指定 GPU
 //
 // 通过把 GPU 的 Number 设置为 UsedNum，
 // 让底层 allocator 认为这块 GPU 已经没有可分配空间，从而跳过它。
@@ -539,7 +541,7 @@ func (a *exclusiveGPUDevices) DeepCopy() interface{} {
 //   - Release
 //   - DeepCopy
 //
-// 从而在不修改底层 vGPU allocator 的前提下，实现“按规则独占 GPU”。
+// 从而在不修改底层 vGPU allocator 的前提下，实现"按规则独占 GPU"。
 func (dp *deviceSharePlugin) wrapGPUDevicesForExclusivity(ssn *framework.Session) {
 	dp.lock.Lock()
 	defer dp.lock.Unlock()

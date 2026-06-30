@@ -42,50 +42,72 @@ const (
 	PluginName = "deviceshare"
 
 	// 以下这些 key 用于从调度器配置参数中读取开关/配置项
+
+	// GPUSharingPredicate 控制是否启用 GPU 共享模式（多个 Pod 共享同一块物理 GPU）
 	GPUSharingPredicate = "deviceshare.GPUSharingEnable"
-	NodeLockEnable      = "deviceshare.NodeLockEnable"
-	GPUNumberPredicate  = "deviceshare.GPUNumberEnable"
-	VGPUEnable          = "deviceshare.VGPUEnable"
 
+	// NodeLockEnable 控制是否启用节点锁机制，防止并发修改设备状态
+	NodeLockEnable = "deviceshare.NodeLockEnable"
+
+	// GPUNumberPredicate 控制是否启用 GPU 编号模式（指定具体 GPU 卡号）
+	GPUNumberPredicate = "deviceshare.GPUNumberEnable"
+
+	// VGPUEnable 控制是否启用 vGPU 虚拟化模式（将物理 GPU 切分为多个虚拟 GPU）
+	VGPUEnable = "deviceshare.VGPUEnable"
+
+	// AscendMindClusterVNPU 控制是否启用昇腾 MindCluster VNPU 模式
 	AscendMindClusterVNPU = "deviceshare.AscendMindClusterVNPUEnable"
-	AscendHAMiVNPUEnable  = "deviceshare.AscendHAMiVNPUEnable"
 
+	// AscendHAMiVNPUEnable 控制是否启用昇腾 HAMi VNPU 模式
+	AscendHAMiVNPUEnable = "deviceshare.AscendHAMiVNPUEnable"
+
+	// SchedulePolicyArgument 指定调度策略，例如 binpack（紧凑）或 spread（分散）
 	SchedulePolicyArgument = "deviceshare.SchedulePolicy"
-	ScheduleWeight         = "deviceshare.ScheduleWeight"
 
-	KnownGeometriesCMName      = "deviceshare.KnownGeometriesCMName"
+	// ScheduleWeight 指定设备打分的权重系数
+	ScheduleWeight = "deviceshare.ScheduleWeight"
+
+	// KnownGeometriesCMName vGPU 几何配置 ConfigMap 的名称
+	KnownGeometriesCMName = "deviceshare.KnownGeometriesCMName"
+
+	// KnownGeometriesCMNamespace vGPU 几何配置 ConfigMap 的命名空间
 	KnownGeometriesCMNamespace = "deviceshare.KnownGeometriesCMNamespace"
 )
 
-// once 用于保证某些注册逻辑只执行一次
+// once 用于保证某些注册逻辑只执行一次（线程安全）
 var (
 	once sync.Once
 )
 
 // deviceSharePlugin 是 deviceshare 插件的核心结构体
 type deviceSharePlugin struct {
-	// 插件配置参数
+	// 插件配置参数，从 Volcano 调度器配置文件读取
 	pluginArguments framework.Arguments
 
-	// 调度策略，例如 binpack / spread 等
+	// 调度策略，例如 binpack（优先填满节点）/ spread（优先分散到不同节点）等
 	schedulePolicy string
 
-	// 设备调度权重
+	// 设备调度权重，影响最终节点打分
 	scheduleWeight int
 
-	// lock 用于保护跨调度周期持久化的数据
+	// lock 用于保护跨调度周期持久化的数据，避免并发读写冲突
 	lock sync.RWMutex
 
 	// persistedGPUs 用于保存跨 session 的 GPU 占用信息
 	// 结构：nodeName -> namespace/name -> GPU index 集合
+	// 作用：在多次调度周期之间保留 GPU 独占关系，防止重启后丢失状态
 	persistedGPUs map[string]map[string]map[int]struct{}
 
 	// persistedPodRules 保存跨 session 的 pod 命中规则信息
 	// 结构：nodeName -> namespace/name -> rule index 集合
+	// 作用：配合 persistedGPUs 恢复 GPU 独占规则状态
 	persistedPodRules map[string]map[string]map[int]struct{}
 }
 
 // New 创建 deviceshare 插件实例
+//
+// 这是插件的构造函数，由 Volcano 调度器框架调用。
+// 初始化后会立即调用 enablePredicate 来读取配置并注册设备。
 func New(arguments framework.Arguments) framework.Plugin {
 	dsp := &deviceSharePlugin{
 		pluginArguments:   arguments,
@@ -100,17 +122,28 @@ func New(arguments framework.Arguments) framework.Plugin {
 }
 
 // Name 返回插件名称
+//
+// 这个名称用于在 Volcano 框架中标识此插件，
+// 必须与配置文件中指定的插件名一致。
 func (dp *deviceSharePlugin) Name() string {
 	return PluginName
 }
 
 // enablePredicate 负责读取配置并初始化全局设备开关
+//
+// 这个函数在插件创建时调用，主要完成：
+// 1. 从配置参数中读取各类设备开关
+// 2. 进行冲突检查（例如 GPU Sharing 和 VGPU 不能同时开启）
+// 3. 初始化设备配置（如 vGPU 几何形状 ConfigMap）
+// 4. 注册启用的设备类型到全局列表
 func enablePredicate(dsp *deviceSharePlugin) {
 	// nodeLockEnable 控制是否启用节点锁机制
+	// 节点锁用于防止多个调度器实例同时修改同一节点的设备状态
 	nodeLockEnable := false
 	args := dsp.pluginArguments
 
 	// 从配置中读取各类开关
+	// args.GetBool 会从配置文件中查找对应的 key，并将值写入第一个参数指向的变量
 	args.GetBool(&gpushare.GpuSharingEnable, GPUSharingPredicate)
 	args.GetBool(&gpushare.GpuNumberEnable, GPUNumberPredicate)
 	args.GetBool(&nodeLockEnable, NodeLockEnable)
@@ -119,26 +152,31 @@ func enablePredicate(dsp *deviceSharePlugin) {
 	args.GetBool(&hami.AscendHAMiVNPUEnable, AscendHAMiVNPUEnable)
 
 	// 将 nodeLockEnable 写入不同设备实现中
+	// 注意：这里是直接修改全局变量，所以需要用 once 保证线程安全
 	gpushare.NodeLockEnable = nodeLockEnable
 	vgpu.NodeLockEnable = nodeLockEnable
 	hami.NodeLockEnable = nodeLockEnable
 
 	// 读取调度策略与权重
+	// schedulePolicy 决定打分策略，例如 binpack 倾向于让任务集中在少数节点
 	args.GetString(&dsp.schedulePolicy, SchedulePolicyArgument)
 	args.GetInt(&dsp.scheduleWeight, ScheduleWeight)
 	vgpu.SchedulePolicy = dsp.schedulePolicy
 
 	// 配置冲突检查：GPUSharing 和 GPUNumber 不能同时开启
+	// 因为这两种模式互斥：共享模式允许多个 Pod 共用 GPU，编号模式要求独占整卡
 	if gpushare.GpuSharingEnable && gpushare.GpuNumberEnable {
 		klog.Fatal("can not define true in both gpu sharing and gpu number")
 	}
 
 	// GPUShare/GPUNumber 与 VGPU 不能同时开启
+	// vGPU 是硬件级虚拟化，与软件层的共享/编号机制不兼容
 	if (gpushare.GpuSharingEnable || gpushare.GpuNumberEnable) && vgpu.VGPUEnable {
 		klog.Fatal("gpu-share and vgpu can't be used together")
 	}
 
 	// 读取 vGPU 几何配置 ConfigMap 的名称与命名空间
+	// vGPU 几何配置定义了不同 GPU 型号的内存切分规则
 	knownGeometriesCMName := "volcano-vgpu-device-config"
 	args.GetString(&knownGeometriesCMName, KnownGeometriesCMName)
 
@@ -146,24 +184,36 @@ func enablePredicate(dsp *deviceSharePlugin) {
 	args.GetString(&knownGeometriesCMNamespace, KnownGeometriesCMNamespace)
 
 	// 初始化设备配置
+	// 这里会监听 ConfigMap 变化，动态更新 vGPU 几何配置
 	config.InitDevicesConfig(knownGeometriesCMName, knownGeometriesCMNamespace)
 
 	// 注册设备类型
+	// 只有启用的设备才会被注册到全局设备列表中
 	registerDevices()
 }
 
 // registerDevices 将启用的设备注册到 Volcano 全局设备列表中
+//
+// 使用 once.Do 保证注册逻辑只执行一次，避免重复注册。
+// 注册后的设备类型会被 Volcano 框架识别和管理。
 func registerDevices() {
 	once.Do(func() {
+		// 如果启用了 GPU 共享或编号模式，注册 gpushare 设备
 		if gpushare.GpuSharingEnable || gpushare.GpuNumberEnable {
 			api.RegisterDevice(gpushare.DeviceName)
 		}
+
+		// 如果启用了 vGPU 模式，注册 vgpu 设备
 		if vgpu.VGPUEnable {
 			api.RegisterDevice(vgpu.DeviceName)
 		}
+
+		// 如果启用了昇腾 MindCluster VNPU，注册 vnpu 设备
 		if vnpu.AscendMindClusterVNPUEnable {
 			api.RegisterDevice(vnpu.DeviceName)
 		}
+
+		// 如果启用了昇腾 HAMi VNPU，注册所有配置的 VNPU 类型
 		if hami.AscendHAMiVNPUEnable {
 			for _, vnpu := range config.GetConfig().VNPUs {
 				klog.V(3).Infof("register device %s", vnpu.CommonWord)
@@ -174,6 +224,9 @@ func registerDevices() {
 }
 
 // createStatus 创建一个 api.Status，方便返回错误状态
+//
+// 这是一个辅助函数，用于统一创建状态对象。
+// code 表示状态码（如 Success、Error 等），reason 是错误描述。
 func createStatus(code int, reason string) *api.Status {
 	status := api.Status{
 		Code:   code,
@@ -191,7 +244,7 @@ func createStatus(code int, reason string) *api.Status {
 //
 // 注意：
 // - vnpu 设备使用 BatchNodeOrderFn，这里跳过
-// - 这里只处理 NodeOrderFn 相关的设备
+// - 这里只处理 NodeOrderFn 相关的设备（如 vgpu、gpushare）
 func getDeviceScore(ctx context.Context, pod *v1.Pod, node *api.NodeInfo, schedulePolicy string) (int64, *fwk.Status) {
 	s := float64(0)
 	for deviceType, device := range node.Others {
@@ -205,10 +258,14 @@ func getDeviceScore(ctx context.Context, pod *v1.Pod, node *api.NodeInfo, schedu
 		}
 	}
 	klog.V(4).Infof("deviceScore for task %s/%s is: %v", pod.Namespace, pod.Name, s)
+	// math.Floor(s + 0.5) 实现四舍五入
 	return int64(math.Floor(s + 0.5)), nil
 }
 
 // getDeviceScoresInBatch 批量计算多个节点的设备评分
+//
+// 某些设备（如 VNPU）需要同时比较多个节点的资源分布情况，
+// 才能做出最优分配决策。这种场景下使用批量打分。
 func getDeviceScoresInBatch(pod *v1.Pod, schedulePolicy string, allDevices []api.Devices) []float64 {
 	switch d := allDevices[0].(type) {
 	case *vnpu.NPUDevices:
@@ -221,6 +278,9 @@ func getDeviceScoresInBatch(pod *v1.Pod, schedulePolicy string, allDevices []api
 }
 
 // initScoreMap 初始化节点分数字典
+//
+// 为每个节点创建一个初始分数为 0.0 的条目，
+// 后续会根据设备打分结果累加分数。
 func initScoreMap(nodes []*api.NodeInfo) map[string]float64 {
 	scoreMap := make(map[string]float64, len(nodes))
 	for _, node := range nodes {
@@ -236,6 +296,8 @@ func initScoreMap(nodes []*api.NodeInfo) map[string]float64 {
 //
 // 某些设备需要依赖当前调度会话里的节点/任务信息进行初始化，
 // 例如 VNPU 设备需要根据当前 session 中的资源状态建立内部索引。
+//
+// 这个函数在每个调度周期开始时调用，确保设备对象拥有最新的集群状态。
 func initializeDevicesWithSession(ssn *framework.Session) {
 	for _, nodeInfo := range ssn.Nodes { // initialize every device in every node with global ssn
 		for _, val := range api.RegisteredDevices {
@@ -249,6 +311,9 @@ func initializeDevicesWithSession(ssn *framework.Session) {
 }
 
 // initializeDevice 初始化单个设备对象
+//
+// 根据不同的设备类型，调用相应的初始化函数。
+// 目前只有 VNPU 设备需要 session 级初始化。
 func initializeDevice(device api.Devices, ssn *framework.Session, nodeInfo *api.NodeInfo) error {
 	switch d := device.(type) {
 	case *vnpu.NPUDevices:
@@ -268,12 +333,16 @@ func initializeDevice(device api.Devices, ssn *framework.Session, nodeInfo *api.
 // 3. 注册 PredicateFn：用于判断一个 pod 是否能放到某节点
 // 4. 注册 NodeOrderFn：用于对单节点打分
 // 5. 注册 BatchNodeOrderFn：用于批量节点打分
+//
+// 调度周期（Session）是 Volcano 的核心概念，每次调度一批任务时会创建一个新 session。
 func (dp *deviceSharePlugin) OnSessionOpen(ssn *framework.Session) {
-	// 在初始化和注册之前，先把 GPU 设备包装成支持“独占规则”的版本
+	// 在初始化和注册之前，先把 GPU 设备包装成支持"独占规则"的版本
 	// 这样整个调度周期内使用的都是包装后的设备对象
+	// 如果配置中没有 GPUExclusiveRules，这个函数会直接返回，不做任何操作
 	dp.wrapGPUDevicesForExclusivity(ssn)
 
 	// 初始化设备（某些设备需要 session 作为输入）
+	// 例如 VNPU 设备需要根据当前 session 中的任务分布建立索引
 	initializeDevicesWithSession(ssn)
 
 	// =========================================================
@@ -301,6 +370,7 @@ func (dp *deviceSharePlugin) OnSessionOpen(ssn *framework.Session) {
 				}
 
 				// 调用设备插件自己的 FilterNode 进行过滤
+				// 对于包装后的 exclusiveGPUDevices，这里会先屏蔽已占用的 GPU 再过滤
 				code, msg, err := dev.FilterNode(task.Pod, dp.schedulePolicy)
 				if err != nil {
 					klog.V(4).Infof("pod %s/%s fit failed. device %s node %s err %v", task.Pod.Namespace, task.Pod.Name, val, node.Name, err)
@@ -330,6 +400,9 @@ func (dp *deviceSharePlugin) OnSessionOpen(ssn *framework.Session) {
 	// =========================================================
 	// NodeOrderFn 用于给单个节点打分，分数越高/越低取决于调度器策略
 	// 这里会根据设备得分和 scheduleWeight 计算最终节点分数。
+	//
+	// 打分阶段在所有通过 Predicate 的节点上进行，
+	// 调度器会选择分数最优的节点来放置 Pod。
 	ssn.AddNodeOrderFn(dp.Name(), func(task *api.TaskInfo, node *api.NodeInfo) (float64, error) {
 		nodeScore := float64(0)
 		if dp.scheduleWeight > 0 {
@@ -340,6 +413,7 @@ func (dp *deviceSharePlugin) OnSessionOpen(ssn *framework.Session) {
 			}
 
 			// 最终设备分数 = 设备原始分数 * 插件配置权重
+			// 权重为 0 时，设备打分不影响节点选择
 			nodeScore = float64(score) * float64(dp.scheduleWeight)
 			klog.V(5).Infof("Node: %s, task<%s/%s> Device Score weight %d, score: %f", node.Name, task.Namespace, task.Name, dp.scheduleWeight, nodeScore)
 		}
@@ -350,12 +424,16 @@ func (dp *deviceSharePlugin) OnSessionOpen(ssn *framework.Session) {
 	// 注册 BatchNodeOrderFn
 	// =========================================================
 	// 批量打分用于某些设备（例如 vnpu）需要同时比较多个节点的场景
+	// 这与 NodeOrderFn 的区别是：
+	// - NodeOrderFn：独立计算每个节点的分数
+	// - BatchNodeOrderFn：可以同时看到所有候选节点，做全局优化
 	ssn.AddBatchNodeOrderFn(dp.Name(), func(task *api.TaskInfo, nodes []*api.NodeInfo) (map[string]float64, error) {
 		scoreMap := initScoreMap(nodes)
 
 		if dp.scheduleWeight > 0 {
 			for _, deviceType := range api.RegisteredDevices {
 				// 这里只处理需要 batch scoring 的设备类型
+				// 目前只有 vnpu 设备使用批量打分
 				if deviceType != vnpu.DeviceName {
 					continue
 				}
@@ -409,5 +487,10 @@ func (dp *deviceSharePlugin) OnSessionOpen(ssn *framework.Session) {
 }
 
 // OnSessionClose 在调度会话结束时调用
-// 这里目前没有额外清理逻辑
+//
+// 目前这个函数没有额外清理逻辑，因为：
+// - persistedGPUs 和 persistedPodRules 需要跨 session 保留
+// - 设备对象的清理由各自的生命周期管理
+//
+// 如果未来需要在 session 结束时执行某些操作（如统计、日志），可以在这里添加。
 func (dp *deviceSharePlugin) OnSessionClose(ssn *framework.Session) {}
