@@ -216,10 +216,8 @@ func GenerateNumaNodes(nodes map[string]*NodeInfo) map[string][]int {
 		if node.NumaSchedulerInfo == nil {
 			continue
 		}
-
 		nodeNumaMap[node.Name] = node.NumaSchedulerInfo.CPUDetail.NUMANodes().List()
 	}
-
 	return nodeNumaMap
 }
 

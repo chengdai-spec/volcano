@@ -16,19 +16,28 @@ limitations under the License.
 
 package policy
 
+// policyNone 实现了 "none" 拓扑策略
+//
+// 【策略特点】
+// none 策略是最宽松的策略，对 NUMA 拓扑不做任何约束。
+// 无论 HintProvider 返回什么提示，都直接允许 Pod 准入。
+// 适用于对 NUMA 局部性没有要求的普通工作负载。
 type policyNone struct {
 	numaNodes []int
 }
 
-// NewPolicyNone return a new policy interface
+// NewPolicyNone 创建并返回一个 none 策略实例
 func NewPolicyNone(numaNodes []int) Policy {
 	return &policyNone{numaNodes: numaNodes}
 }
 
+// canAdmitPodResult none 策略下始终返回 true，允许任何拓扑方案准入
 func (policy *policyNone) canAdmitPodResult(hint *TopologyHint) bool {
 	return true
 }
 
+// Predicate none 策略的准入判断：直接返回空提示 + 允许准入
+// 不做任何拓扑提示的收集和合并，直接放行
 func (policy *policyNone) Predicate(providersHints []map[string][]TopologyHint) (TopologyHint, bool) {
 	return TopologyHint{}, policy.canAdmitPodResult(nil)
 }
