@@ -153,16 +153,16 @@ func createPatch(pod *v1.Pod) ([]byte, error) {
 	return json.Marshal(patch)
 }
 
-// patchSchedulingGates adds a scheduling gate for Volcano-managed pods.
-// The gate prevents cluster autoscalers from seeing the pod until Volcano
-// determines it's ready (queue admission + gang scheduling satisfied).
+// patchSchedulingGates 为 Volcano 管理的 Pod 添加一个 scheduling gate（调度门闩）。
+// 这个 gate 会阻止集群自动扩缩容器（cluster autoscaler）看到这个 Pod，
+// 直到 Volcano 判断它已经准备好（队列准入 + gang 调度条件都满足）。
 func patchSchedulingGates(pod *v1.Pod) *patchOperation {
-	// Skip if SchedulingGatesQueueAdmission feature gate is not enabled
+	// 如果没有启用 SchedulingGatesQueueAdmission 特性开关，则跳过
 	if !utilfeature.DefaultFeatureGate.Enabled(features.SchedulingGatesQueueAdmission) {
 		return nil
 	}
 
-	// Check if opt-in annotation is present
+	// 检查是否存在 opt-in 注解
 	if !api.HasQueueAllocationGateAnnotation(pod) {
 		klog.V(4).Infof("Pod %s/%s does not have opt-in annotation, skipping gate",
 			pod.Namespace, pod.Name)
@@ -171,16 +171,16 @@ func patchSchedulingGates(pod *v1.Pod) *patchOperation {
 
 	gate := v1.PodSchedulingGate{Name: schedulingv1beta1.QueueAllocationGateKey}
 
-	// Idempotent: do not add a duplicate Volcano gate.
-	// This prevents appending the same gate multiple times if the mutation is retried.
+	// 幂等性处理：不要重复添加同一个 Volcano gate。
+	// 这样可以防止在 mutation 重试时重复追加同样的 gate。
 	for _, g := range pod.Spec.SchedulingGates {
 		if g.Name == gate.Name {
 			return nil
 		}
 	}
 
-	// Parent missing: The schedulingGates slice hasn't been initialized yet.
-	// We must use "add" on the base path with an array containing our gate.
+	// 父字段不存在：说明 schedulingGates 切片还没有初始化。
+	// 这时必须在基础路径上使用 add，并传入一个包含该 gate 的数组。
 	if pod.Spec.SchedulingGates == nil {
 		return &patchOperation{
 			Op:    "add",
@@ -189,9 +189,9 @@ func patchSchedulingGates(pod *v1.Pod) *patchOperation {
 		}
 	}
 
-	// Parent exists: We can safely append to the existing array.
-	// Using the "-" path operator tells JSON Patch to append to the end of the array,
-	// preventing us from overwriting gates added by parallel webhooks.
+	// 父字段已存在：可以安全地向现有数组追加。
+	// 这里使用 JSON Patch 的 "-" 路径操作符表示追加到数组末尾，
+	// 从而避免覆盖其他 webhook 并发添加的 gate。
 	return &patchOperation{
 		Op:    "add",
 		Path:  "/spec/schedulingGates/-",
