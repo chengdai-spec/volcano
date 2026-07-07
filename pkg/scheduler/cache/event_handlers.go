@@ -1186,6 +1186,42 @@ func (sc *SchedulerCache) AddResourceQuota(obj interface{}) {
 	sc.updateResourceQuota(r)
 }
 
+/*
+apiVersion: nodeinfo.volcano.sh/v1alpha1
+kind: Numatopology
+metadata:
+
+	name: node-1
+
+spec:
+
+	policies:
+	  CPUManagerPolicy: static
+	  TopologyManagerPolicy: best-effort
+	resReserved:
+	  cpu: "2"
+	  memory: "4Gi"
+	numares:
+	  cpu:
+	    allocatable: "0-7"
+	    capacity: 8
+	  memory:
+	    allocatable: "0"
+	    capacity: 64
+	cpuDetail:
+	  "0":
+	    numa: 0
+	    socket: 0
+	    core: 0
+	  "1":
+	    numa: 0
+	    socket: 0
+	    core: 1
+	  "4":
+	    numa: 1
+	    socket: 1
+	    core: 0
+*/
 func getNumaInfo(srcInfo *nodeinfov1alpha1.Numatopology) *schedulingapi.NumatopoInfo {
 	numaInfo := &schedulingapi.NumatopoInfo{
 		Namespace:   srcInfo.Namespace,

@@ -126,7 +126,7 @@ func (pp *numaPlugin) OnSessionOpen(ssn *framework.Session) {
 	// 从所有节点信息中提取 NUMA Node 列表
 	// 结构：map[nodename][]numaNodeID
 	numaNodes := api.GenerateNumaNodes(ssn.Nodes)
-	// 从所有节点信息中提取可用资源的 NUMA 集合（主要是 CPU 集合）
+	// 从所有节点信息中提取可用资源的 NUMA 集合(主要是 CPU 集合)
 	pp.nodeResSets = api.GenerateNodeResNumaSets(ssn.Nodes)
 
 	// 【注册事件处理器】
@@ -295,7 +295,12 @@ func filterNodeByPolicy(task *api.TaskInfo, node *api.NodeInfo, nodeResSets map[
 			return false, fmt.Errorf("numa info is empty")
 		}
 
-		// 节点的 CPU Manager 策略必须是 static，否则无法做 CPU 独占分配
+		/*
+			节点的 CPU Manager 策略必须是 static，否则无法做 CPU 独占分配
+			--cpu-manager-policy
+			none: 所有 Pod 共享 CPU, 不做独占
+			static: Guaranteed QoS 的 Pod 独占 CPU
+		*/
 		if node.NumaSchedulerInfo.Policies[nodeinfov1alpha1.CPUManagerPolicy] != "static" {
 			return false, fmt.Errorf("cpu manager policy isn't static")
 		}
@@ -316,8 +321,8 @@ func filterNodeByPolicy(task *api.TaskInfo, node *api.NodeInfo, nodeResSets map[
 			return false, fmt.Errorf("cpu allocatable map is empty")
 		}
 	} else {
-		// 情况二：Task 没有设置 NUMA 策略（或策略为 none）
-		// 此时需要检查节点是否有 NUMA 能力，如果有则跳过（让有 NUMA 能力的节点留给有 NUMA 需求的 Task）
+		// 情况二：Task 没有设置 NUMA 策略(或策略为 none)
+		// 此时需要检查节点是否有 NUMA 能力，如果有则跳过(让有 NUMA 能力的节点留给有 NUMA 需求的 Task)
 		if node.NumaSchedulerInfo == nil {
 			return false, nil
 		}
@@ -356,7 +361,7 @@ func getNodeNumaNumForTask(nodeInfo []*api.NodeInfo, resAssignMap map[string]api
 	return nodeNumaCnts
 }
 
-// getNumaNodeCntForCPUID 计算给定 CPU 集合跨越了多少个不同的 NUMA Node
+// getNumaNodeCntForCPUID 计算给定 CPU 分布在多少个不同的 NUMA 节点上
 // 原理：遍历每个 CPU ID，查找其所属的 NUMA Node，用 bitmask 去重后统计数量
 // 返回值越小，说明 CPU 分配越集中，NUMA 局部性越好
 func getNumaNodeCntForCPUID(cpus cpuset.CPUSet, cpuDetails topology.CPUDetails) int {
@@ -365,6 +370,15 @@ func getNumaNodeCntForCPUID(cpus cpuset.CPUSet, cpuDetails topology.CPUDetails) 
 
 	for _, cpuID := range s {
 		// 将每个 CPU 所属 NUMA Node ID 加入 bitmask（自动去重）
+		/*
+		   var bits int
+		   bits |= 1 << 0
+		   fmt.Printf("%04b\n", bits) // 0001
+		   bits |= 1 << 2
+		   fmt.Printf("%04b\n", bits) // 0101
+		   bits |= 1 << 0
+		   fmt.Printf("%04b\n", bits) // 0101
+		*/
 		mask.Add(cpuDetails[cpuID].NUMANodeID)
 	}
 

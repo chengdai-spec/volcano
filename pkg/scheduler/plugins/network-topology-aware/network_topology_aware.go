@@ -705,7 +705,11 @@ func (nta *networkTopologyAwarePlugin) batchNodeOrderFnForNetworkAwarePods(ssn *
 //   - allocatedHyperNode: 作业/子作业已分配的 HyperNode(部分运行场景非空，首次调度为空)
 //   - minResource: 最小资源需求，用于资源预过滤(nil 表示跳过资源检查)
 //   - purpose: 搜索目的(调度分配或驱逐)
-func (nta *networkTopologyAwarePlugin) hyperNodeGradientFn(ssn *framework.Session, hyperNode *api.HyperNodeInfo, highestAllowedTier int, allocatedHyperNode string, minResource *api.Resource, purpose api.SearchPurpose) ([][]*api.HyperNodeInfo, error) {
+func (nta *networkTopologyAwarePlugin) hyperNodeGradientFn(
+	ssn *framework.Session, hyperNode *api.HyperNodeInfo,
+	highestAllowedTier int, allocatedHyperNode string,
+	minResource *api.Resource, purpose api.SearchPurpose) ([][]*api.HyperNodeInfo, error) {
+
 	enqueued := set.New[string]()
 	var processQueue []*api.HyperNodeInfo
 

@@ -84,8 +84,9 @@ func filterSingleNumaHints(allResourcesHints [][]TopologyHint) [][]TopologyHint 
 //  4. 只有 preferred 的方案才允许准入
 //
 // 返回值：
-//   TopologyHint：最优拓扑方案（只跨越 1 个 NUMA Node）
-//   bool：仅当方案为 preferred 时为 true
+//
+//	TopologyHint：最优拓扑方案（只跨越 1 个 NUMA Node）
+//	bool：仅当方案为 preferred 时为 true
 func (policy *policySingleNumaNode) Predicate(providersHints []map[string][]TopologyHint) (TopologyHint, bool) {
 	filteredHints := filterProvidersHints(providersHints)
 	// 关键步骤：过滤掉多 NUMA Node 的提示，只保留单 NUMA Node 的候选

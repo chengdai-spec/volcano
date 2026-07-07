@@ -54,14 +54,16 @@ type TopologyHint struct {
 // Policy 拓扑策略接口
 // 不同的策略实现决定了如何从多个 HintProvider 的提示中选出最优的拓扑方案
 type Policy interface {
-	// Predicate 从所有 HintProvider 的提示中选出最优拓扑方案
-	// 参数 providersHints：每个 HintProvider 返回的提示集合
-	//   结构：[]map[resourceName][]TopologyHint
-	//   外层切片：每个 HintProvider 一个元素
-	//   map：资源名 -> 该资源的候选拓扑提示列表
-	// 返回值：
-	//   TopologyHint：选出的最优拓扑方案
-	//   bool：是否允许准入（由具体策略决定）
+	/*
+		Predicate 从所有 HintProvider 的提示中选出最优拓扑方案
+		参数 providersHints：每个 HintProvider 返回的提示集合
+		结构：[]map[resourceName][]TopologyHint
+		外层切片：每个 HintProvider 一个元素
+		map：资源名 -> 该资源的候选拓扑提示列表
+		返回值：
+		TopologyHint：选出的最优拓扑方案
+		bool：是否允许准入（由具体策略决定）
+	*/
 	Predicate(providersHints []map[string][]TopologyHint) (TopologyHint, bool)
 }
 
@@ -91,8 +93,9 @@ type HintProvider interface {
 
 // GetPolicy 根据节点的 Topology Manager 策略返回对应的 Policy 实现
 // 参数：
-//   node：节点信息，包含节点的 NUMA 策略配置
-//   numaNodes：该节点上的 NUMA Node ID 列表
+//
+//	node：节点信息，包含节点的 NUMA 策略配置
+//	numaNodes：该节点上的 NUMA Node ID 列表
 //
 // 策略映射：
 //   - "none"              -> policyNone（无约束）
@@ -117,17 +120,22 @@ func GetPolicy(node *api.NodeInfo, numaNodes []int) Policy {
 
 // AccumulateProvidersHints 收集所有 HintProvider 对指定容器的拓扑提示
 // 参数：
-//   container：待调度的容器
-//   topoInfo：节点的 NUMA 拓扑信息
-//   resNumaSets：节点当前各资源的可用 NUMA 集合
-//   hintProviders：所有注册的 HintProvider 列表
+//
+//	container：待调度的容器
+//	topoInfo：节点的 NUMA 拓扑信息
+//	resNumaSets：节点当前各资源的可用 NUMA 集合
+//	hintProviders：所有注册的 HintProvider 列表
 //
 // 返回：[]map[resourceName][]TopologyHint
-//   外层切片：每个 HintProvider 一个元素
-//   内层 map：该 provider 为每种资源生成的候选拓扑提示
-func AccumulateProvidersHints(container *v1.Container,
-	topoInfo *api.NumatopoInfo, resNumaSets api.ResNumaSets,
+//
+//	外层切片：每个 HintProvider 一个元素
+//	内层 map：该 provider 为每种资源生成的候选拓扑提示
+func AccumulateProvidersHints(
+	container *v1.Container,
+	topoInfo *api.NumatopoInfo,
+	resNumaSets api.ResNumaSets,
 	hintProviders []HintProvider) (providersHints []map[string][]TopologyHint) {
+
 	for _, provider := range hintProviders {
 		hints := provider.GetTopologyHints(container, topoInfo, resNumaSets)
 		providersHints = append(providersHints, hints)
@@ -138,11 +146,12 @@ func AccumulateProvidersHints(container *v1.Container,
 
 // Allocate 根据最优拓扑方案，调用所有 HintProvider 执行具体的资源分配
 // 参数：
-//   container：待调度的容器
-//   bestHit：选出的最优拓扑方案
-//   topoInfo：节点的 NUMA 拓扑信息
-//   resNumaSets：节点当前各资源的可用 NUMA 集合
-//   hintProviders：所有注册的 HintProvider 列表
+//
+//	container：待调度的容器
+//	bestHit：选出的最优拓扑方案
+//	topoInfo：节点的 NUMA 拓扑信息
+//	resNumaSets：节点当前各资源的可用 NUMA 集合
+//	hintProviders：所有注册的 HintProvider 列表
 //
 // 返回：map[resourceName]cpuset.CPUSet，即分配给该容器的各资源的具体 CPU 集合
 func Allocate(container *v1.Container, bestHit *TopologyHint,

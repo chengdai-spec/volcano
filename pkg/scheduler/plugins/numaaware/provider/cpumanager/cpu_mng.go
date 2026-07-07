@@ -169,8 +169,7 @@ func getPhysicalCoresNum(CPUDetails topology.CPUDetails) int {
 //	resNumaSets：节点当前各资源的可用 NUMA 集合
 //
 // 返回：map["cpu"][]TopologyHint，CPU 的 NUMA 亲和方案列表
-func (mng *cpuMng) GetTopologyHints(container *v1.Container,
-	topoInfo *api.NumatopoInfo, resNumaSets api.ResNumaSets) map[string][]policy.TopologyHint {
+func (mng *cpuMng) GetTopologyHints(container *v1.Container, topoInfo *api.NumatopoInfo, resNumaSets api.ResNumaSets) map[string][]policy.TopologyHint {
 	// 检查容器是否有 CPU 请求
 	if _, ok := container.Resources.Requests[v1.ResourceCPU]; !ok {
 		klog.Warningf("container %s has no cpu request", container.Name)

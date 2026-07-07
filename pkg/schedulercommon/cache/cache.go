@@ -15,6 +15,15 @@ type QueueObjectWrapper struct {
 // InitialEventAsyncHandlerTracker track the queue handling status. For initial event put in queue by event handler,
 // use tracker to track whether the initial list handling is completed. In add event handler, call Add(obj) to
 // add initial event in to tracker. After event in queue is handled, call Done(obj) to mark initial event handled.
+/*
+	informer 启动时会同步一批已有对象，这些对象叫 initial list
+	isInInitialList 用来标记这个 Add 事件是不是来自 initial list
+	如果是 initial list，就把它加入 InitialEventAsyncHandlerTracker
+	当队列里真正处理完这个对象后，再调用 Done(obj)
+	tracker 通过 Add/Done 判断初始同步是否全部完成
+
+	InitialEventAsyncHandlerTracker 用来记录这些初始对象是否都已经处理完，判断初始同步是否完成
+*/
 type InitialEventAsyncHandlerTracker struct {
 	UpstreamHasSynced func() bool
 	ObjectSet         sets.Set[string]

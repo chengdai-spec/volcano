@@ -800,7 +800,7 @@ func (dp *deviceSharePlugin) wrapGPUDevicesForExclusivity(ssn *framework.Session
 		// 来源 3（兜底方案）：从跨 session 持久化数据恢复
 		// ---------------------------------------------------------
 		//
-		// 当调度器重启、或 PodMap 和 annotation 都丢失时，
+		// 当调度器重启或 PodMap 和 annotation 都丢失时，
 		// 可以从 plugin 级别的持久化缓存中恢复 GPU 归属关系。
 		//
 		// persistedGPUs[nodeName][podKey] = GPU index 集合
@@ -814,13 +814,14 @@ func (dp *deviceSharePlugin) wrapGPUDevicesForExclusivity(ssn *framework.Session
 		//   persistedGPUs["nodeA"]["default/pod-2"] = {1}
 		//     → pod-2 在 podRules 中 ✓
 		//     → PodMap 中找不到 uid-2 → 需要恢复
-		//     → ruleGPUs[0] += {GPU 1}（重复添加也无所谓，set 自动去重）
+		//     → ruleGPUs[0] += {GPU 1}(重复添加也无所谓，set 自动去重)
 		//
 		//   persistedGPUs["nodeA"]["default/pod-old"] = {3}
-		//     → pod-old 不在 podRules 中 → 跳过（Pod 已不存在）
+		//     → pod-old 不在 podRules 中 → 跳过(Pod 已不存在)
 		//
-		// 来源 3 结束后：ruleGPUs = {0: {0, 1}, 1: {2}}（无变化）
+		// 来源 3 结束后：ruleGPUs = {0: {0, 1}, 1: {2}}(无变化)
 		if persisted, ok := dp.persistedGPUs[node.Name]; ok {
+
 			persistedRules := dp.persistedPodRules[node.Name]
 
 			for pk, gpuSet := range persisted {

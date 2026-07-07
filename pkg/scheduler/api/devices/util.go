@@ -359,9 +359,9 @@ func ExtractResourceRequest(pod *v1.Pod, resourceType, countName, memoryName, pe
 			counts = append(counts, ContainerDeviceRequest{
 				Nums:             int32(n),       // 设备数量
 				Type:             resourceType,   // 设备类型
-				Memreq:           memnum,         // 内存需求（MB 或其他单位）
-				MemPercentagereq: int32(mempnum), // 内存百分比（0-100）
-				Coresreq:         corenum,        // 核心数需求
+				Memreq:           memnum,         // 内存需求(MB 或其他单位)
+				MemPercentagereq: int32(mempnum), // 内存百分比(0-100)
+				Coresreq:         corenum,        // 核心数需求百分比(0-100)
 			})
 		}
 	}

@@ -42,8 +42,8 @@ func NewNodeShardInfo(shard *nodeshardv1alpha1.NodeShard) *NodeShardInfo {
 		NodeShard:    shard,
 	}
 
-	// status 中的 NodesToRemove 和 NodesToAdd 可能存在延迟，
-	// 例如 scheduler 可能是基于旧的 NodesDesired 去更新它们，
+	// status 中的 NodesToRemove 和 NodesToAdd 可能存在延迟,
+	// 例如 scheduler 可能是基于旧的 NodesDesired 去更新它们,
 	// 所以这里重新根据 NodesDesired 和 NodesInUse 计算一次
 	shardInfo.NodeToRemove = shardInfo.NodeInUse.Difference(shardInfo.NodeDesired)
 	shardInfo.NodeToAdd = shardInfo.NodeDesired.Difference(shardInfo.NodeInUse)

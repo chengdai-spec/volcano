@@ -51,6 +51,11 @@ const (
 	// setting the Unschedulable condition on pods until the queue has enough
 	// capacity, preventing cluster autoscalers from triggering unnecessary
 	// scale-ups for pods that are simply waiting for queue admission.
+	/*
+		SchedulingGatesQueueAdmission 使用 Kubernetes 的 schedulingGates 机制,
+		延迟给 Pod 设置 Unschedulable(不可调度)条件,直到调度队列有足够容量.
+		这样可以避免集群自动扩缩容器因为这些只是正在等待进入调度队列的 Pod 而误判,从而触发不必要的扩容
+	*/
 	SchedulingGatesQueueAdmission featuregate.Feature = "SchedulingGatesQueueAdmission"
 )
 

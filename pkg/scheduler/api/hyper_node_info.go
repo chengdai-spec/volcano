@@ -46,7 +46,7 @@ type HyperNodesInfo struct {
 	// 每个 HyperNodeInfo 描述一个 HyperNode 的原始 CRD 对象、层级、父子关系等。
 	hyperNodes HyperNodeInfoMap
 	// hyperNodesSetByTier 按 tier（层级）对 HyperNode 名称进行分组。
-	// tier 数值越小层级越高（如 root=0），便于按层级快速遍历拓扑树。
+	// tier 数值越大层级越高(如 root=5)，便于按层级快速遍历拓扑树。
 	hyperNodesSetByTier map[int]sets.Set[string]
 	// realNodesSet 缓存每个 HyperNode 最终展开得到的真实节点集合。
 	//
@@ -304,7 +304,7 @@ func (hni *HyperNodesInfo) DeleteHyperNode(name string) error {
 // UpdateHyperNode 在 HyperNode CRD 发生变化时更新内部缓存。
 //
 // 处理流程：
-//  1. 根据新的成员列表更新父节点关系（移除不再存在的子节点引用）；
+//  1. 根据新的成员列表更新父节点关系(移除不再存在的子节点引用)；
 //  2. 更新按 tier 分组的集合；
 //  3. 更新或新建 HyperNodeInfo；
 //  4. 重建该节点所有祖先的缓存，使 realNodesSet 等数据保持最新。
@@ -952,7 +952,7 @@ func (hnim HyperNodeInfoMap) getParent(name string) string {
 		tier = hn.tier
 	}
 	for _, hn := range hnim {
-		// 父节点的 tier 必须比子节点高（数值更小）。
+		// 父节点的 tier 必须比子节点高(数值更大)
 		if hn.tier <= tier {
 			continue
 		}

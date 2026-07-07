@@ -367,22 +367,54 @@ func (ssn *Session) removeInvalidAllocatedHyperNode(job *api.JobInfo, hyperNodes
 // recoverAllocatedHyperNode recover the allocated hyperNode for the job and subJobs in the job with empty AllocatedHyperNode field.
 // When the scheduler reboot, the allocated hyperNode of job will be lost.
 // We recover this information through the nodes that tasks are running on.
-func (ssn *Session) recoverAllocatedHyperNode(job *api.JobInfo, hyperNodeSet sets.Set[string], hyperNodes api.HyperNodeInfoMap, nodesByHyperNode map[string]sets.Set[string]) {
+
+/*
+recoverAllocatedHyperNode 会恢复 job 和其 subJobs 中缺失的 AllocatedHyperNode。
+
+当调度器重启后，job 上原本记录的 AllocatedHyperNode 可能丢失，
+这里会根据当前已经分配到的节点信息，重新推导出该字段的值。
+
+恢复逻辑分两步：
+1. 先恢复每个 subJob 的 AllocatedHyperNode：
+  - 找出该 subJob 中所有处于 allocated 状态的 task
+  - 根据这些 task 所在的 NodeName，反推出它们共同位于哪些 HyperNode
+  - 选出其中层级最低(最细粒度)的 HyperNode 作为 subJob 的 AllocatedHyperNode
+
+2. 再恢复 job 的 AllocatedHyperNode：
+  - 遍历所有 subJob 的 AllocatedHyperNode
+  - 计算这些 HyperNode 的最低公共祖先（LCA）
+  - 将其作为 job 的 AllocatedHyperNode
+*/
+func (ssn *Session) recoverAllocatedHyperNode(
+	job *api.JobInfo,
+	hyperNodeSet sets.Set[string],
+	hyperNodes api.HyperNodeInfoMap,
+	nodesByHyperNode map[string]sets.Set[string],
+) {
+	// 如果这个 job 根本不包含网络拓扑信息，那么没有必要恢复 AllocatedHyperNode。
 	if !job.ContainsNetworkTopology() {
 		return
 	}
-
+	// 标记在恢复 subJob 的 AllocatedHyperNode 过程中，job 是否发生了更新。
+	// 如果 subJob 被修改了，后面 job 的 AllocatedHyperNode 也可能需要重新计算。
 	subJobUpdated := false
-
-	// update subJob AllocatedHyperNode based on allocated nodes
+	// =========================
+	// 第一步：恢复 subJob 的 AllocatedHyperNode
+	// =========================
 	for _, subJob := range job.SubJobs {
+		// 只有满足以下条件的 subJob 才需要恢复：
+		// 1. subJob 本身带有网络拓扑约束
+		// 2. subJob 当前没有 AllocatedHyperNode
+		//
+		// 如果 subJob 已经有值了，说明不需要恢复，直接跳过。
 		if !subJob.WithNetworkTopology() || subJob.AllocatedHyperNode != "" {
 			continue
 		}
-
-		// pick up allocated tasks in the subJob
+		// 收集该 subJob 中所有处于 allocated 状态的任务。
+		// 这些任务的 NodeName 会用于反推 subJob 的 HyperNode 归属。
 		allocatedTasks := make([]*api.TaskInfo, 0, subJob.AllocatedTaskNum())
 		for status, tasks := range subJob.TaskStatusIndex {
+			// 只处理已分配状态的任务
 			if !api.AllocatedStatus(status) {
 				continue
 			}
@@ -390,65 +422,89 @@ func (ssn *Session) recoverAllocatedHyperNode(job *api.JobInfo, hyperNodeSet set
 				allocatedTasks = append(allocatedTasks, task)
 			}
 		}
-
-		// find the allocated hyperNode through the nodes that tasks are running on
+		// subJobAllocatedHyperNode 表示：
+		// 当前已经推导出来的“候选 HyperNode 集合”。
+		//
+		// 对于第一个任务，它可能属于多个 HyperNode，所以先在全量 hyperNodeSet 中搜索；
+		// 对于后续任务，则只在上一个结果集合里继续收缩，逐步求交集。
 		var subJobAllocatedHyperNode sets.Set[string]
+		// 遍历 subJob 中所有已分配任务，逐个缩小可行 HyperNode 范围。
 		for _, task := range allocatedTasks {
+			// 如果 task 没有 NodeName，说明虽然状态是 allocated，
+			// 但没有实际绑定节点，这种情况无法恢复，记录告警并跳过。
 			if task.NodeName == "" {
 				klog.Warningf("task %s/%s in allocated status %s with empty nodeName", task.Namespace, task.Name, task.Status)
 				continue
 			}
-
-			// For the first task, we search among all the hyperNodes.
-			// For the other tasks, we search from the hyperNodes that previous tasks were allocated to.
+			// 第一个任务时，从所有 HyperNode 中搜索；
+			// 后续任务时，从前一次筛选出的 HyperNode 中继续搜索。
 			var search sets.Set[string]
 			if subJobAllocatedHyperNode == nil {
 				search = hyperNodeSet
 			} else {
 				search = subJobAllocatedHyperNode
 			}
-
+			// taskAllocatedHyperNode 用来保存：当前 task 所在节点属于哪些 HyperNode。
 			taskAllocatedHyperNode := sets.New[string]()
+			// 遍历候选 HyperNode，检查该 HyperNode 下的节点集合中是否包含 task 所在节点。
 			for hn := range search {
 				if nodes, found := nodesByHyperNode[hn]; found && nodes.Has(task.NodeName) {
 					taskAllocatedHyperNode.Insert(hn)
 				}
 			}
-			klog.V(4).Infof("find allocated hyperNode %v for task %s/%s by node %s", taskAllocatedHyperNode, task.Namespace, task.Name, task.NodeName)
-
+			klog.V(4).Infof("find allocated hyperNode %v for task %s/%s by node %s",
+				taskAllocatedHyperNode, task.Namespace, task.Name, task.NodeName)
+			// 将当前任务筛选后的结果，作为下一轮任务的搜索范围。
 			subJobAllocatedHyperNode = taskAllocatedHyperNode
+			// 如果经过筛选后没有任何 HyperNode 可用，说明恢复失败。
 			if subJobAllocatedHyperNode.Len() == 0 {
 				klog.Errorf("failed to find allocated hyperNode for subJob %s by allocated nodes", subJob.UID)
 				break
 			}
 		}
+		// 从候选 HyperNode 集合中，选择 tier 最低的那个作为 subJob 的最终 AllocatedHyperNode。
+		// 这里“最低”表示更细粒度、更具体的拓扑域。
 		minimumHyperNode := getLowestTierHyperNode(subJobAllocatedHyperNode, hyperNodes)
-
+		// 如果恢复出来的结果和原来不同，就写回 subJob，并标记 job 脏数据。
 		if subJob.AllocatedHyperNode != minimumHyperNode {
 			subJobUpdated = true
 			subJob.AllocatedHyperNode = minimumHyperNode
 			ssn.MarkJobDirty(subJob.Job)
-			klog.V(3).InfoS("update subJob allocated hyperNode", "subJob", subJob.UID, "AllocatedHyperNode", minimumHyperNode)
+			klog.V(3).InfoS("update subJob allocated hyperNode",
+				"subJob", subJob.UID,
+				"AllocatedHyperNode", minimumHyperNode)
 		}
 	}
-
-	// update job AllocatedHyperNode based on subJob allocated hyperNode
+	// =========================
+	// 第二步：恢复 job 的 AllocatedHyperNode
+	// =========================
+	//
+	// 如果 job 本身没有 AllocatedHyperNode，或者 subJob 的结果发生了变化，
+	// 那么 job 的 AllocatedHyperNode 也需要重新计算。
 	if job.AllocatedHyperNode == "" || subJobUpdated {
 		var lca string
+		// 遍历所有 subJob 的 AllocatedHyperNode，计算它们的最低公共祖先（LCA）。
+		// 这表示整个 job 的分配拓扑范围。
 		for _, subJob := range job.SubJobs {
+			// 如果 subJob 没有 AllocatedHyperNode，就跳过。
 			if subJob.AllocatedHyperNode == "" {
 				continue
 			}
+			// 将当前 lca 与这个 subJob 的 AllocatedHyperNode 做 LCA 合并。
 			lca = hyperNodes.GetLCAHyperNode(lca, subJob.AllocatedHyperNode)
+			// 如果合并后为空，说明无法找到共同祖先，恢复失败。
 			if lca == "" {
 				klog.Errorf("failed to find allocated hyperNode for job %s by subJob allocated hyperNodes", job.UID)
 				break
 			}
 		}
+		// 如果恢复结果与原值不同，则写回 job。
 		if job.AllocatedHyperNode != lca {
 			job.AllocatedHyperNode = lca
 			ssn.MarkJobDirty(job.UID)
-			klog.V(3).InfoS("update job allocated hyperNode", "job", job.UID, "AllocatedHyperNode", lca)
+			klog.V(3).InfoS("update job allocated hyperNode",
+				"job", job.UID,
+				"AllocatedHyperNode", lca)
 		}
 	}
 }
@@ -1085,40 +1141,63 @@ func (ssn *Session) adjustNetworkTopologySpec() {
 	}
 }
 
-// convertSoftToHardTopology converts all soft network topology constraints in the job to hard mode.
-// Conversion strategy:
-//   - Job-level soft: converted with maxTier (ClusterTopHyperNode tier), achieving no HyperNode
-//     filtering (full soft affinity across the cluster).
-//   - SubJob-level soft: converted with the effective job-level tier (subJobMaxTier).
-//     If the job has a hard tier limit (either user-specified or from the job-level conversion above),
-//     subgroup soft affinity is bounded by that limit. This properly handles the mixed-mode scenario
-//     where job is hard but subgroup is soft: the subgroup prefers lower tiers but never exceeds
-//     the job's hard tier constraint.
+// convertSoftToHardTopology 将 Job 中所有软网络拓扑约束转换成硬模式。
+// 这样做的目的，是统一调度逻辑：
+// 1. Job 级别的 soft 拓扑转成 hard 后，可以走同一套硬拓扑调度流程；
+// 2. SubJob 级别的 soft 拓扑也会被转换，但它的层级上限不能超过 Job 级别的硬限制；
+// 3. 这样可以避免 SubJob 绕过 Job 的约束，保证整体拓扑策略一致。
 func convertSoftToHardTopology(job *api.JobInfo, maxTier int) {
+	// 如果 Job 没有 PodGroup，说明没有可处理的调度组信息，直接返回。
 	if job.PodGroup == nil {
 		return
 	}
 
-	// Convert job-level soft topology to hard mode with maxTier.
+	// =========================
+	// 1. 处理 Job 级别的 soft 拓扑
+	// =========================
+	// 如果 Job 存在 NetworkTopology，并且当前模式是 soft，
+	// 就把它转换为 hard 模式。
 	if job.NetworkTopology != nil &&
 		job.NetworkTopology.Mode == scheduling.SoftNetworkTopologyMode {
+
+		// 打印日志，便于调试和排查问题。
 		klog.V(3).InfoS("Converting job-level soft topology to hard mode",
 			"job", job.UID, "maxTier", maxTier)
+
+		// 将模式从 soft 改成 hard。
 		job.NetworkTopology.Mode = scheduling.HardNetworkTopologyMode
+
+		// 将允许的最高 tier 设置为 maxTier（通常是 ClusterTopHyperNode 对应的 tier）。
+		// 这样做的效果是：Job 级别不再因为拓扑层级过低而被过滤掉，
+		// 相当于在整个集群范围内做软亲和，但实现上走的是 hard 路径。
 		job.NetworkTopology.HighestTierAllowed = &maxTier
+
+		// 清空 tier 名称，因为现在直接用 tier 数值控制，不再依赖名称。
 		job.NetworkTopology.HighestTierName = ""
 	}
 
-	// Determine the effective maxTier for SubJob conversion.
-	// If the job has an effective tier limit (from hard mode or job-level soft→hard conversion above),
-	// subgroup soft affinity must be bounded by it. Otherwise, fall back to the cluster-wide maxTier.
+	// =========================
+	// 2. 计算 SubJob 转换时使用的有效最大 tier
+	// =========================
+	// 默认情况下，SubJob 允许使用整个集群范围的 maxTier。
 	subJobMaxTier := maxTier
+
+	// 如果 Job 自己已经存在明确的 tier 限制，
+	// 那么 SubJob 的 soft 亲和也必须受这个限制约束。
+	// 这个限制可能来自：
+	// 1) 用户本来就指定了 hard 限制；
+	// 2) 上面把 Job 级别 soft 转 hard 后设置的限制。
 	if job.NetworkTopology != nil &&
 		job.NetworkTopology.HighestTierAllowed != nil {
 		subJobMaxTier = *job.NetworkTopology.HighestTierAllowed
 	}
 
-	// Convert SubJob-level topology (SubJobInfo has its own deep-copied networkTopology).
+	// =========================
+	// 3. 处理所有 SubJob 的拓扑约束
+	// =========================
+	// 遍历 Job 下的所有 SubJob，并将它们的拓扑约束转换成 hard。
+	// 每个 SubJob 都会使用 subJobMaxTier 作为允许的最大 tier。
+	// 这样保证 SubJob 的软亲和不会突破 Job 的硬边界。
 	for _, subJob := range job.SubJobs {
 		subJob.ConvertToHardTopology(subJobMaxTier)
 	}
