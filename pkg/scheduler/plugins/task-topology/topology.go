@@ -414,6 +414,12 @@ func (p *taskTopologyPlugin) initBucket(ssn *framework.Session) {
 		}
 
 		// 从 PodGroup annotations 读取拓扑配置
+		/*
+			annotations:
+			  volcano.sh/task-topology-affinity: "ps,worker;ps,chief"
+			  volcano.sh/task-topology-anti-affinity: "ps;worker,chief"
+			  volcano.sh/task-topology-task-order: "ps,worker,chief,evaluator"
+		*/
 		jobTopology, err := readTopologyFromPgAnnotations(job)
 		if err != nil {
 			klog.V(4).Infof("Failed to read task topology from job <%s/%s> annotations, error: %s.",
@@ -490,7 +496,6 @@ func affinityCheck(job *api.JobInfo, affinity [][]string) error {
 			affTasks[task] = true
 		}
 	}
-
 	return nil
 }
 
@@ -628,9 +633,9 @@ func readTopologyFromPgAnnotations(job *api.JobInfo) (*TaskTopology, error) {
 // 流程:
 //  1. 记录开始时间
 //  2. 调用 initBucket 初始化所有作业的桶
-//  3. 注册 TaskOrderFn（任务排序回调）
-//  4. 注册 NodeOrderFn（节点评分回调）
-//  5. 注册 AllocateFunc（任务分配事件回调）
+//  3. 注册 TaskOrderFn(任务排序回调)
+//  4. 注册 NodeOrderFn(节点评分回调)
+//  5. 注册 AllocateFunc(任务分配事件回调)
 //  6. 记录耗时
 func (p *taskTopologyPlugin) OnSessionOpen(ssn *framework.Session) {
 	start := time.Now()

@@ -128,24 +128,53 @@ func getVolcanoClient(restConfig *rest.Config) *versioned.Clientset {
 	return clientset
 }
 
-// configTLS is a helper function that generate tls certificates from directly defined tls config or kubeconfig
-// These are passed in as command line for cluster certification. If tls config is passed in, we use the directly
-// defined tls config, else use that defined in kubeconfig.
+// configTLS 是一个辅助函数，用于生成 TLS 配置。
+// 它支持两种证书来源：
+// 1. 直接通过 config 传入的证书数据（CertData/KeyData/CaCertData）
+// 2. 如果 config 中没有，则尝试从 restConfig 中获取证书数据
+//
+// 该函数通常用于 Webhook 服务开启 HTTPS/TLS。
 func configTLS(config *options.Config, restConfig *rest.Config) *tls.Config {
+	// -------------------------------------------------------
+	// 第一种情况：config 中显式提供了证书和私钥
+	//
+	// 例如：
+	//   config.CertData = 服务端证书
+	//   config.KeyData  = 服务端私钥
+	//   config.CaCertData = CA 证书
+	//
+	// 这是最完整、最常见的一种 TLS 配置方式
+	// -------------------------------------------------------
 	if len(config.CertData) != 0 && len(config.KeyData) != 0 {
+		// 创建一个证书池，用于保存 CA 证书
+		// 这里的 CA 证书通常用于验证客户端证书，或者作为信任根
 		certPool := x509.NewCertPool()
 		certPool.AppendCertsFromPEM(config.CaCertData)
 
+		// 将 PEM 格式的证书和私钥解析成一个 tls.Certificate
 		sCert, err := tls.X509KeyPair(config.CertData, config.KeyData)
 		if err != nil {
+			// 如果证书格式不合法、证书和私钥不匹配，直接退出
 			klog.Fatal(err)
 		}
 
+		// 返回完整的 TLS 配置
 		return &tls.Config{
+			// 服务端证书链
 			Certificates: []tls.Certificate{sCert},
-			RootCAs:      certPool,
-			MinVersion:   tls.VersionTLS12,
-			ClientAuth:   tls.VerifyClientCertIfGiven,
+
+			// 信任的根 CA 证书池
+			RootCAs: certPool,
+
+			// 最低 TLS 版本限制，避免使用过低版本
+			MinVersion: tls.VersionTLS12,
+
+			// 客户端证书认证策略：
+			// 如果客户端提供证书，则验证；
+			// 如果客户端不提供证书，也允许连接
+			ClientAuth: tls.VerifyClientCertIfGiven,
+
+			// 限定允许的加密套件
 			CipherSuites: []uint16{
 				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
 				tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
@@ -154,17 +183,29 @@ func configTLS(config *options.Config, restConfig *rest.Config) *tls.Config {
 		}
 	}
 
+	// -------------------------------------------------------
+	// 第二种情况：config 中没有证书，则尝试从 restConfig 读取
+	//
+	// 这通常意味着证书是在 kubeconfig 或其他客户端配置里带进来的
+	// -------------------------------------------------------
 	if len(restConfig.CertData) != 0 && len(restConfig.KeyData) != 0 {
+		// 将 restConfig 中的 PEM 证书和私钥解析为 tls.Certificate
 		sCert, err := tls.X509KeyPair(restConfig.CertData, restConfig.KeyData)
 		if err != nil {
 			klog.Fatal(err)
 		}
 
+		// 返回一个最基本的 TLS 配置
+		// 这里只设置了服务端证书，其他参数使用默认值
 		return &tls.Config{
 			Certificates: []tls.Certificate{sCert},
 		}
 	}
 
+	// -------------------------------------------------------
+	// 如果两种来源都没有证书数据，则无法启用 TLS
+	// 因此直接退出
+	// -------------------------------------------------------
 	klog.Fatal("tls: failed to find any tls config data")
 	return &tls.Config{}
 }

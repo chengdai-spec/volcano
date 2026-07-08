@@ -490,10 +490,10 @@ func (jm *JobManager) checkTaskSetAffinity(taskName string, taskNameSet map[stri
 //
 // 分桶策略:
 //  1. 已绑定节点的任务:
-//     - 优先放入该节点对应的桶（通过 nodeBucketMapping 缓存）
+//     - 优先放入该节点对应的桶(通过 nodeBucketMapping 缓存)
 //     - 如果该节点还没有对应桶，则新建一个桶
 //  2. 未绑定节点的任务:
-//     - 遍历所有现有桶，计算任务与每个桶的亲和性评分（checkTaskSetAffinity）
+//     - 遍历所有现有桶，计算任务与每个桶的亲和性评分(checkTaskSetAffinity)
 //     - 选择亲和性评分最高的桶
 //     - 如果评分相同，选择资源评分（reqScore）更小的桶（负载均衡）
 //  3. 如果所有桶的亲和性评分都为负（说明该任务与所有桶都反亲和），
