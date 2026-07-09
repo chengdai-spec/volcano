@@ -41,7 +41,7 @@ import (
 //     2. NodeOrderFn: 调整节点评分，使具有亲和关系的任务尽量调度到同一节点
 //
 // 插件生命周期:
-//   - OnSessionOpen: 初始化桶（读取拓扑配置、构建桶、注册回调函数）
+//   - OnSessionOpen: 初始化桶(读取拓扑配置、构建桶、注册回调函数)
 //   - 调度循环:     TaskOrderFn 和 NodeOrderFn 被反复调用
 //   - OnSessionClose: 清理资源
 // ============================================================================
@@ -247,78 +247,128 @@ func (p *taskTopologyPlugin) TaskOrderFn(l interface{}, r interface{}) int {
 //
 // 返回:
 //   - score: 桶评分
-//   - jobManager: 任务所属的 JobManager（可能为nil）
+//   - jobManager: 任务所属的 JobManager(可能为nil)
 //   - error: 错误信息
 // ============================================================================
 
 // calcBucketScore 计算任务在节点上的桶评分
+//
+// 该函数是 NodeOrderFn 的核心，用于评估"把某个任务调度到某个节点"的优劣。
+// 评分越高，说明该节点越适合放这个任务（从拓扑亲和性角度）。
+//
+// 评分由四个部分组成:
+//   1. 基础评分: 该节点上已有多少同桶任务(越多越好，说明亲和关系强)
+//   2. 反亲和惩罚: 节点上已有任务与当前任务反亲和时扣分
+//   3. 桶内加成: 桶内待调度任务数量(假设它们也能跟来)
+//   4. 资源适配调整: 如果节点放不下整个桶，逐步扣分直到能放下
 func (p *taskTopologyPlugin) calcBucketScore(task *api.TaskInfo, node *api.NodeInfo) (int, *JobManager, error) {
-	// 检查节点的最大可用资源是否能容纳该任务
-	// maxResource = 空闲资源 + 释放中资源
+	// ================================================================
+	// 前置检查 1: 节点资源能否容纳当前任务本身
+	// ================================================================
+	// maxResource = 空闲资源 + 释放中资源（即将回收的资源）
+	// 例如: node-A.Idle=4CPU/8Gi, Releasing=0 → maxResource=4CPU/8Gi
+	// 如果 ps1 请求 1CPU/2Gi，4CPU/8Gi >= 1CPU/2Gi → 通过
 	maxResource := node.Idle.Clone().Add(node.Releasing)
 	if req := task.Resreq; req != nil && maxResource.LessPartly(req, api.Zero) {
-		// 任务无法放入节点，返回0分
+		// 节点连当前这一个任务都放不下，直接返回0分
+		// 例如: node-C 只剩 0.5CPU，ps1 需要 1CPU → 0分
 		return 0, nil, nil
 	}
 
-	// 获取任务所属作业的 JobManager
+	// ================================================================
+	// 前置检查 2: 获取任务的 JobManager 和 Bucket
+	// ================================================================
 	jobManager, hasManager := p.managers[task.Job]
 	if !hasManager {
+		// 该作业没有拓扑配置，不参与评分
 		return 0, nil, nil
 	}
 
-	// 获取任务所属的桶
 	bucket := jobManager.GetBucket(task)
-	// 桶外任务返回0分
 	if bucket == nil {
+		// 该任务是桶外任务（无拓扑配置或被 MarkOutOfBucket），返回0分
+		// 桶外任务不受 task-topology 插件影响
 		return 0, jobManager, nil
 	}
 
-	// 1. 基础评分: 该节点上已绑定的桶内任务数量
-	// 已有越多桶内任务在此节点，评分越高（增强亲和）
+	// ================================================================
+	// 评分第 1 部分: 基础评分
+	// ================================================================
+	// bucket.node[node.Name] 表示该节点上已绑定的桶内任务数量
+	// 例如: ps1 属于 Bucket1，Bucket1.node["node-A"]=0 → 基础分=0
+	//       如果 ps0 属于 Bucket0，Bucket0.node["node-A"]=2 → 基础分=2
+	// 含义: 节点上已有越多同桶任务，亲和关系越强，评分越高
 	score := bucket.node[node.Name]
 
-	// 2. 计算反亲和惩罚
-	// 检查节点上已绑定的任务与当前任务的反亲和关系
+	// ================================================================
+	// 评分第 2 部分: 反亲和惩罚
+	// ================================================================
+	// nodeTaskSet 记录了该节点上所有作业的所有任务类型分布
+	// 例如: node-A 上有 {ps:1, worker:1}
+	//       checkTaskSetAffinity("ps", {ps:1, worker:1}, onlyAnti=true)
+	//       → ps 自身反亲和 → -1
+	//       → score += (-1) → score = 0 + (-1) = -1
+	// 含义: 节点上有与当前任务反亲和的任务时扣分，促使任务分散
 	if nodeTaskSet := jobManager.nodeTaskSet[node.Name]; nodeTaskSet != nil {
 		taskName := getTaskName(task)
-		// onlyAnti=true 表示只计算反亲和评分（负分）
+		// onlyAnti=true: 只计算反亲和评分（负分），不计算亲和加分
+		// 因为亲和加分已经通过 bucket.node 在第1部分体现了
 		affinityScore := jobManager.checkTaskSetAffinity(taskName, nodeTaskSet, true)
 		if affinityScore < 0 {
-			// 反亲和惩罚: 减分
+			// 反亲和惩罚只有负分才生效（正分说明无反亲和，不需要调整）
 			score += affinityScore
 		}
 	}
 	klog.V(4).Infof("task %s/%s, node %s, additional score %d, task %d",
 		task.Namespace, task.Name, node.Name, score, len(bucket.tasks))
 
-	// 3. 桶内其他待调度任务加成
-	// 假设当前任务调度到该节点后，桶内其他任务也可能调度到该节点
+	// ================================================================
+	// 评分第 3 部分: 桶内待调度任务加成
+	// ================================================================
+	// len(bucket.tasks) 是桶内尚未绑定的待调度任务数量（含当前任务）
+	// 例如: Bucket1 有 {ps1, worker1} → len=2 → score += 2
+	// 含义: 桶内还有这么多任务可能被调度到这个节点，
+	//       桶越大、潜在收益越高
 	score += len(bucket.tasks)
 
-	// 4. 检查桶的总资源请求是否能放入节点
+	// ================================================================
+	// 评分第 4 部分: 资源适配调整
+	// ================================================================
+	// 检查节点能否容纳整个桶的资源请求
+	// 例如: bucket.request = 3CPU/6Gi (ps1 + worker1)
+	//       maxResource(node-A) = 4CPU/8Gi → 3CPU/6Gi <= 4CPU/8Gi → 直接返回
+	//       maxResource(node-A) = 2CPU/4Gi → 3CPU/6Gi > 2CPU/4Gi → 需要削减
 	if bucket.request == nil || bucket.request.LessEqual(maxResource, api.Zero) {
-		// 桶的总请求能放入节点，直接返回评分
+		// 桶的总请求能放入节点，无需削减，直接返回
+		// 例如: node-A 4CPU/8Gi >= 3CPU/6Gi → return score=1, jobManager, nil
 		return score, jobManager, nil
 	}
 
-	// 桶的总请求超过节点可用资源，需要逐步移除桶内任务直到能放入
+	// 桶的总请求超过节点可用资源，需要逐步"放弃"桶内其他任务
+	// 每放弃一个任务，评分-1，直到剩余请求能放入节点
+	// 例如: node-A 只剩 2CPU/4Gi，bucket.request=3CPU/6Gi
+	//       遍历 bucket.tasks:
+	//         - 遇到 worker1 (2CPU/4Gi): remains -= 2CPU/4Gi → remains=1CPU/2Gi, score-- → 0
+	//           检查 1CPU/2Gi <= 2CPU/4Gi → 满足，break
+	//       最终 score=0，含义: node-A 只能放 ps1 自己，worker1 放不下
 	remains := bucket.request.Clone()
-	// 遍历桶内其他待调度任务（map遍历是随机的）
+	// 注意: map 遍历顺序是随机的，因此削减哪些任务不完全确定
+	// 但最终保证 remains 能放入节点
 	for bucketTaskID, bucketTask := range bucket.tasks {
-		// 当前任务不应被移除
+		// 当前任务不能被移除（它一定放在这个节点上）
 		if bucketTaskID == task.Pod.UID || bucketTask.Resreq == nil {
 			continue
 		}
-		// 移除一个任务的资源请求，评分-1
+		// 从剩余请求中减去该任务的资源
 		remains.Sub(bucketTask.Resreq)
+		// 评分-1: 桶内少一个任务能跟来
 		score--
 		// 检查剩余请求是否能放入节点
 		if remains.LessEqual(maxResource, api.Zero) {
 			break
 		}
 	}
-	// 此时桶的剩余请求一定能放入节点
+	// 此时桶的剩余请求一定能放入节点（至少当前任务本身能放下，前面已校验）
 	return score, jobManager, nil
 }
 
@@ -399,7 +449,7 @@ func (p *taskTopologyPlugin) AllocateFunc(event *framework.Event) {
 //   2. 跳过没有待调度任务的作业
 //   3. 从 PodGroup annotations 读取拓扑配置
 //   4. 创建 JobManager 并应用拓扑配置
-//   5. 构建桶（将任务按亲和性分配到桶中）
+//   5. 构建桶(将任务按亲和性分配到桶中)
 //   6. 将 JobManager 保存到插件实例的 managers map 中
 // ============================================================================
 
