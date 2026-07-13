@@ -111,8 +111,8 @@ PredicatesPlugin
 	├── OnSessionOpen()    → 会话开启：初始化 Handle + 注册所有回调
 	├── InitPlugin()       → 初始化 10 个原生插件，按扩展点分类
 	├── PrePredicate()     → PreFilter 阶段：为所有 pending pod 预处理
-	├── Predicate()         → Filter 阶段：判断节点是否适合运行任务
-	├── BatchNodeOrder()    → Score 阶段：批量计算节点得分
+	├── Predicate()        → Filter 阶段：判断节点是否适合运行任务
+	├── BatchNodeOrder()   → Score 阶段：批量计算节点得分
 	├── PreBind()          → PreBind 阶段：完成 PV/PVC 真实绑定等
 	├── PreBindRollBack()  → PreBind 失败回滚
 	└── OnSessionClose()   → 会话关闭（当前为空）

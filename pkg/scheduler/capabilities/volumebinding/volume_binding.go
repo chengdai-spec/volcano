@@ -58,18 +58,18 @@ const (
 // stateData 保存了 volumeBinding 插件在整个调度周期（PreFilter -> Filter -> Reserve -> PreBind）中需要的状态。
 // 该状态在 PreFilter 阶段初始化，后续阶段通过同一个指针访问，因此无需显式 Write 更新。
 type stateData struct {
-	// allBound 标记该 Pod 的所有 PVC 是否都已绑定（AssumePodVolumes 的结果）。
+	// allBound 标记该 Pod 的所有 PVC 是否都已绑定(AssumePodVolumes 的结果)
 	allBound bool
-	// podVolumesByNode 记录 Filter 阶段为每个候选节点找到的卷绑定方案（PodVolumes）。
-	// 在 PreFilter 阶段初始化为空 map，在 Filter 阶段按节点填充。
+	// podVolumesByNode 记录 Filter 阶段为每个候选节点找到的卷绑定方案(PodVolumes)
+	// 在 PreFilter 阶段初始化为空 map，在 Filter 阶段按节点填充
 	podVolumesByNode map[string]*PodVolumes
-	// podVolumeClaims 保存 Pod 中所有 PVC 的分类信息（已绑定、延迟绑定未绑定、立即绑定未绑定）。
+	// podVolumeClaims 保存 Pod 中所有 PVC 的分类信息(已绑定、延迟绑定未绑定、立即绑定未绑定)
 	podVolumeClaims *PodVolumeClaims
-	// hasStaticBindings 声明 Pod 是否包含一个或多个静态绑定（StaticBinding）。
-	// 如果没有静态绑定，volumeBinding 将跳过 Score 扩展点。
+	// hasStaticBindings 声明 Pod 是否包含一个或多个静态绑定(StaticBinding)
+	// 如果没有静态绑定，volumeBinding 将跳过 Score 扩展点
 	hasStaticBindings bool
-	// 互斥锁，保护 podVolumesByNode 和 hasStaticBindings 的并发访问。
-	// 因为多个节点会并发执行 Filter，必须通过锁保证状态安全。
+	// 互斥锁，保护 podVolumesByNode 和 hasStaticBindings 的并发访问
+	// 因为多个节点会并发执行 Filter，必须通过锁保证状态安全
 	sync.Mutex
 }
 
@@ -156,6 +156,7 @@ func (pl *VolumeBinding) EventsToRegister(_ context.Context) ([]fwk.ClusterEvent
 		{Event: fwk.ClusterEvent{Resource: fwk.CSIDriver, ActionType: fwk.Update}, QueueingHintFn: pl.isSchedulableAfterCSIDriverChange},
 		{Event: fwk.ClusterEvent{Resource: fwk.CSIStorageCapacity, ActionType: fwk.Add | fwk.Update}, QueueingHintFn: pl.isSchedulableAfterCSIStorageCapacityChange},
 	}
+
 	return events, nil
 }
 
@@ -258,7 +259,7 @@ func (pl *VolumeBinding) isSchedulableAfterStorageClassChange(logger klog.Logger
 }
 
 // isSchedulableAfterCSIStorageCapacityChange 判断 CSIStorageCapacity 变更是否可能使 Pod 变为可调度。
-// CSIStorageCapacity 的新增以及 volume limit（基于 capacity 和 maximumVolumeSize 计算）的提升都可能使 Pod 可调度。
+// CSIStorageCapacity 的新增以及 volume limit(基于 capacity 和 maximumVolumeSize 计算)的提升都可能使 Pod 可调度。
 // 注意：nodeTopology 和 storageClassName 不允许更新，因此无需考虑。
 func (pl *VolumeBinding) isSchedulableAfterCSIStorageCapacityChange(logger klog.Logger, pod *v1.Pod, oldObj, newObj interface{}) (fwk.QueueingHint, error) {
 	oldCap, newCap, err := util.As[*storagev1beta1.CSIStorageCapacity](oldObj, newObj)
@@ -274,6 +275,21 @@ func (pl *VolumeBinding) isSchedulableAfterCSIStorageCapacityChange(logger klog.
 		)
 		return fwk.Queue, nil
 	}
+	/*
+		apiVersion: storage.k8s.io/v1
+		kind: CSIStorageCapacity
+		metadata:
+		  name: example-capacity
+		  namespace: kube-system
+		storageClassName: fast
+		capacity: 100Gi
+		maximumVolumeSize: 20Gi
+		nodeTopology:
+		  matchLabelExpressions:
+		    - key: topology.kubernetes.io/zone
+		      values:
+		        - us-east-1a
+	*/
 
 	oldLimit := volumeLimit(oldCap)
 	newLimit := volumeLimit(newCap)
@@ -484,69 +500,126 @@ func (pl *VolumeBinding) PreScore(ctx context.Context, cs fwk.CycleState, pod *v
 // Score 在 score 扩展点被调用，对节点进行存储容量评分。
 // 评分逻辑根据静态绑定或动态供给分别汇总每个 StorageClass 的请求容量和可用容量，
 // 然后通过 scorer 函数计算最终分数。
+//
+// 这个函数的目标不是判断“能不能调度”，
+// 而是判断“在所有可调度节点里，哪个节点更适合这个 Pod 的卷需求”。
+//
+// 举例：
+// - Pod 需要 50Gi 的 fast 存储；
+// - node-1 的 fast 存储剩余 100Gi，利用率 50%；
+// - node-2 的 fast 存储剩余 60Gi，利用率 83.3%。
+// 如果 scorer 的策略是“利用率越低分越高”，则 node-1 得分更高。
 func (pl *VolumeBinding) Score(ctx context.Context, cs fwk.CycleState, pod *v1.Pod, nodeInfo fwk.NodeInfo) (int64, *fwk.Status) {
+	// 如果没有配置 scorer，说明本插件不参与打分
 	if pl.scorer == nil {
 		return 0, nil
 	}
+
+	// 从 CycleState 中取出 PreFilter 阶段保存的状态
 	state, err := getStateData(cs)
 	if err != nil {
 		return 0, fwk.AsStatus(err)
 	}
+
+	// 当前正在评分的节点名
 	nodeName := nodeInfo.Node().Name
+
+	// 取出 Filter 阶段为该节点计算好的卷绑定方案
+	// 这一步说明：不同节点的卷匹配结果是不同的
 	podVolumes, ok := state.podVolumesByNode[nodeName]
 	if !ok {
+		// 如果当前节点没有对应的卷方案，说明这个节点在 Filter 阶段没通过
+		// 理论上不应该走到这里，但这里做兜底保护
 		return 0, nil
 	}
 
 	/*
-		apiVersion: storage.k8s.io/v1beta1
-		kind: CSIStorageCapacity
-		metadata:
-		  name: fast-ssd-zone-a
-		  namespace: kube-system
-		storageClassName: fast-ssd
-		capacity: 500Gi
-		nodeTopology:
-		  matchLabels:
-			topology.kubernetes.io/zone: zone-a
+		classResources 的含义：
+		按 StorageClass 聚合该 Pod 在当前节点上的存储请求和可用容量。
+
+		例如：
+		Pod 有两个 PVC：
+		  - pvc-a: storageClass=fast, request=20Gi
+		  - pvc-b: storageClass=fast, request=30Gi
+
+		则聚合结果可能是：
+		  classResources["fast"] = {Requested: 50Gi, Capacity: 100Gi}
 	*/
 	classResources := make(classResourceMap)
+
+	// 这里分两种情况：
+	// 1. 存在静态绑定
+	// 2. 没启用 StorageCapacity scoring
+	//
+	// 这两种情况下，都按静态绑定 PV 的容量进行统计
 	if len(podVolumes.StaticBindings) != 0 || !pl.fts.EnableStorageCapacityScoring {
-		// 按 StorageClass 聚合静态绑定卷的容量信息。
+		// 遍历所有静态绑定关系，把同一 StorageClass 的资源聚合起来
 		for _, staticBinding := range podVolumes.StaticBindings {
+			// 该绑定对应的 StorageClass 名称
 			class := staticBinding.StorageClassName()
+
+			// 获取该 PVC 请求容量与 PV 总容量
 			storageResource := staticBinding.StorageResource()
+
+			// 如果这个 StorageClass 还没初始化，就新建一个桶
 			if _, ok := classResources[class]; !ok {
 				classResources[class] = &StorageResource{
 					Requested: 0,
 					Capacity:  0,
 				}
 			}
+
+			// 累加请求容量
 			classResources[class].Requested += storageResource.Requested
+
+			// 累加容量
 			classResources[class].Capacity += storageResource.Capacity
 		}
 	} else {
-		// 按 StorageClass 聚合动态供给卷的容量信息。
+		// 如果没有静态绑定，并且启用了 StorageCapacity scoring，
+		// 那么就按动态供给场景统计 CSIStorageCapacity
 		for _, provision := range podVolumes.DynamicProvisions {
+			// NodeCapacity 可能为空，说明没有拿到容量信息，直接跳过
 			if provision.NodeCapacity == nil {
 				continue
 			}
+
+			// 动态供给时，取 PVC 的 StorageClass
 			class := *provision.PVC.Spec.StorageClassName
+
+			// 初始化聚合桶
 			if _, ok := classResources[class]; !ok {
 				classResources[class] = &StorageResource{
 					Requested: 0,
 					Capacity:  0,
 				}
 			}
-			// 注意：下面这行不能写成 +=。例如，Pod 请求两个 50GB 卷，
-			// 而节点上该 StorageClass 容量为 100GB，这段代码会执行两次。
-			// 如果使用 +=，classResources[class].Capacity 会被错误地累加为 200GB。
+
+			/*
+				注意：这里不能用 +=
+
+				原因：
+				如果一个 Pod 有两个同类卷：
+				  - 卷1请求 50Gi
+				  - 卷2请求 50Gi
+				而该节点该 StorageClass 的 CSIStorageCapacity 是 100Gi。
+
+				如果你写成：
+				  Capacity += 100Gi
+				会变成 200Gi，这是错误的，因为节点总容量不是两次叠加的。
+				所以这里直接赋值即可。
+			*/
 			classResources[class].Capacity = provision.NodeCapacity.Capacity.Value()
+
+			// 累加请求容量
 			requestedQty := provision.PVC.Spec.Resources.Requests[v1.ResourceName(v1.ResourceStorage)]
 			classResources[class].Requested += requestedQty.Value()
 		}
 	}
 
+	// 最后调用 scorer 计算分数
+	// scorer 会根据每个 StorageClass 的 Requested / Capacity 比例，
+	// 算出节点整体存储适配得分
 	return pl.scorer(classResources), nil
 }
 

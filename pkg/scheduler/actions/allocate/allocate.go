@@ -14,13 +14,13 @@
  limitations under the License.
 */
 
-// Package allocate 实现了 Volcano 调度器的「资源分配」动作（Action）。
+// Package allocate 实现了 Volcano 调度器的「资源分配」动作(Action)
 //
-// 整体调度流程（从宏观到微观）：
+// 整体调度流程(从宏观到微观)：
 //  1. 队列排序 → 选出优先级最高的队列
-//  2. 作业排序 → 从该队列中选出优先级最高的作业（Job）
-//  3. 子作业排序 → 从作业中选出需要调度的子作业（SubJob）
-//  4. 任务排序 → 从子作业中选出待调度的任务（Task/Pod）
+//  2. 作业排序 → 从该队列中选出优先级最高的作业(Job)
+//  3. 子作业排序 → 从作业中选出需要调度的子作业(SubJob)
+//  4. 任务排序 → 从子作业中选出待调度的任务(Task/Pod)
 //  5. 节点过滤 → 用谓词函数(Predicate)过滤掉不满足要求的节点
 //  6. 节点打分 → 用打分函数(NodeOrderFn)选出最优节点，将任务绑定到该节点
 //
@@ -87,7 +87,7 @@ func (w *JobWorksheet) ShallowCopyFrom(another *JobWorksheet) {
 	w.subJobWorksheets = another.subJobWorksheets
 }
 
-// Empty 判断工作表是否为空（没有待调度的 SubJob 了）
+// Empty 判断工作表是否为空(没有待调度的 SubJob 了)
 func (w *JobWorksheet) Empty() bool {
 	return w.subJobs == nil || w.subJobs.Empty()
 }
@@ -180,9 +180,9 @@ func (alloc *Action) Execute(ssn *framework.Session) {
 	alloc.parseArguments(ssn)
 
 	// Pod 的分配可能有多个阶段：
-	// 1. 选择一个名为 Q 的队列（使用 ssn.QueueOrderFn）
-	// 2. 从队列 Q 中选择一个名为 J 的作业（使用 ssn.JobOrderFn）
-	// 3. 从作业 J 中选择一个名为 T 的任务（使用 ssn.TaskOrderFn）
+	// 1. 选择一个名为 Q 的队列(使用 ssn.QueueOrderFn)
+	// 2. 从队列 Q 中选择一个名为 J 的作业(使用 ssn.JobOrderFn)
+	// 3. 从作业 J 中选择一个名为 T 的任务(使用 ssn.TaskOrderFn)
 	// 4. 使用 predicateFn 过滤掉 T 无法分配的节点
 	// 5. 使用 ssn.NodeOrderFn 判断最佳节点，并将其分配给 T
 	alloc.session = ssn

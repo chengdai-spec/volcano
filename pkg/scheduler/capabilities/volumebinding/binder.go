@@ -822,6 +822,39 @@ func (b *volumeBinder) GetPodVolumeClaims(logger klog.Logger, pod *v1.Pod) (podV
 //  2. 遍历每个已绑定 PVC，从 PV 缓存中取出对应 PV；
 //  3. 调用 tryTranslatePVToCSI 将 in-tree PV 翻译成 CSI PV（如果该 PV/节点已迁移）；
 //  4. 使用 volume.CheckNodeAffinity 校验 PV 的节点亲和性与当前节点标签是否匹配。
+/*
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pv-demo-001
+spec:
+  capacity:
+    storage: 100Gi
+  accessModes:
+    - ReadWriteOnce
+  volumeMode: Filesystem
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: fast
+  mountOptions:
+    - hard
+    - nfsvers=4.1
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: topology.kubernetes.io/zone
+              operator: In
+              values:
+                - us-east-1a
+  csi:
+    driver: ebs.csi.aws.com
+    volumeHandle: vol-0abcd1234ef567890
+    fsType: ext4
+    volumeAttributes:
+      encrypted: "true"
+      type: gp3
+
+*/
 func (b *volumeBinder) checkBoundClaims(logger klog.Logger, claims []*v1.PersistentVolumeClaim, node *v1.Node, pod *v1.Pod) (bool, bool, error) {
 	csiNode, err := b.csiNodeLister.Get(node.Name)
 	if err != nil {
