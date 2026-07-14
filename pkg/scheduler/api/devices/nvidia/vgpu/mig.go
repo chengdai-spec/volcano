@@ -27,12 +27,26 @@ import (
 	"volcano.sh/volcano/pkg/scheduler/api/devices/config"
 )
 
+// MIGFactory 实现 MIG（Multi-Instance GPU）模式的 SharingFactory。
+//
+// MIG 是 NVIDIA A100/H100 等显卡支持的硬件级虚拟化技术，
+// 可以将一块物理 GPU 在硬件层面切分为多个互相隔离的 GPU 实例。
+// 每个实例拥有独立的显存、计算核心和缓存，彼此完全隔离。
+//
+// 与 hami-core 不同，MIG 模式下 Volcano 调度器需要理解几何切分模板，
+// 并跟踪每个 MIG 实例的占用情况。
 type MIGFactory struct{}
 
 func init() {
 	RegisterFactory(vGPUControllerMIG, MIGFactory{})
 }
 
+// TryAddPod 在 predicate 阶段尝试为该 Pod 分配一个 MIG 实例。
+//
+// 流程：
+//  1. 根据配置的 GPUMemoryFactor 对请求显存进行缩放。
+//  2. 调用 findMatch 在 MigTemplate 和 MigUsage 中查找满足显存需求的 MIG 实例。
+//  3. 若找到，更新设备的 UsedNum、UsedMem、UsedCore，返回 MIG 实例 ID。
 func (f MIGFactory) TryAddPod(gd *GPUDevice, mem uint, core uint) (bool, string) {
 	requestMemory := mem
 	memoryFactor := getConfig().GPUMemoryFactor
@@ -56,6 +70,12 @@ func (f MIGFactory) TryAddPod(gd *GPUDevice, mem uint, core uint) (bool, string)
 	return true, dev
 }
 
+// AddPod 真正将 Pod 加入指定的 MIG 实例。
+//
+// 流程：
+//  1. 从 devID 中解析出 group 名称和 position（MIG 实例位置）。
+//  2. 调用 addMigUsed 更新 MigUsage，标记该 MIG 实例已被占用。
+//  3. 更新设备的 UsedNum、UsedMem、UsedCore 以及 PodMap。
 func (f MIGFactory) AddPod(gd *GPUDevice, mem uint, core uint, podUID string, devID string) error {
 	group, index, err := decodeMIGID(devID)
 	if err != nil {
@@ -90,6 +110,12 @@ func (f MIGFactory) AddPod(gd *GPUDevice, mem uint, core uint, podUID string, de
 	return nil
 }
 
+// SubPod 将 Pod 从指定的 MIG 实例中释放。
+//
+// 流程：
+//  1. 从 devID 中解析出 group 名称和 position。
+//  2. 调用 subMigUsed 更新 MigUsage，回收 MIG 实例。
+//  3. 更新设备的 UsedNum、UsedMem、UsedCore，并从 PodMap 中删除 Pod。
 func (f MIGFactory) SubPod(gd *GPUDevice, mem uint, core uint, podUID string, devID string) error {
 	groupName, index, err := decodeMIGID(devID)
 	if err != nil {
@@ -117,7 +143,26 @@ func (f MIGFactory) SubPod(gd *GPUDevice, mem uint, core uint, podUID string, de
 	return nil
 }
 
-// Try to find a match
+// findMatch 根据请求的显存在 MIG 几何模板中查找一个可用实例。
+//
+// 参数：
+//   - uuid: 物理 GPU 的 UUID
+//   - requestMem: 请求显存（已考虑 memoryFactor 缩放）
+//   - usage: 当前 MIG 使用状态
+//   - allowedGeometries: 该 GPU 支持的几何切分模板列表
+//
+// 返回值：
+//   - bool: 是否找到匹配实例
+//   - string: 匹配到的 MIG 实例 ID（格式见 encodeMIGID）
+//   - uint: 该实例实际占用的显存
+//
+// 逻辑：
+//   - 如果当前已经选定了一个 group（usage.Index >= 0），则只在该 group 内查找。
+//   - 否则遍历所有 group，按顺序尝试匹配。
+//
+// 实际案例：
+// 某 A100 支持 group2：3×2g.20gb + 1×1g.10gb。
+// 当前未使用 MIG，Pod 请求 15GiB，则 findMatch 会返回 2g.20gb 实例（20GiB >= 15GiB）。
 func findMatch(
 	uuid string,
 	requestMem uint,
@@ -149,25 +194,17 @@ func findMatch(
 	return false, "", 0
 }
 
-/*
-The uuid for mig device is like this: GPU-0fc3eda5-e98b-a25b-5b0d-cf5c855d1448[group2,3]
-The group2 is the name of the group; The "3" is the position in the group which is
-resource count before this resource group + in-resource index - 1.
-For example: the group define like this:
-  - models: [ "A100-SXM4-80GB", "A100 80GB PCIe", "A100-PCIE-80GB"]
-    allowedGeometries:
-  - group: "group2"
-    geometries:
-  - name: 2g.20gb
-    memory: 20480
-    count: 3
-  - name: 1g.10gb
-    memory: 10240
-    count: 1
-
-The position of "1g.10gb" in group2 is 3 + 1 - 1. "3" is the resource count before
-"1g.10gb", the "1" is in-resource index.
-*/
+// pickFromGroup 在一个 group 内查找满足显存需求且仍有空闲槽位的 MIG 实例。
+//
+// 查找策略：
+//   - 按实例显存从小到大排序。
+//   - 优先选择能满足 requestMemory 的最小实例，减少显存浪费。
+//   - 若该类型实例有空闲槽位（Count - len(UsedIndex) > 0），则分配。
+//
+// 返回值：
+//   - bool: 是否找到
+//   - int: MIG 实例在 group 中的 position
+//   - uint: 实例显存容量
 func pickFromGroup(group config.Geometry, usage config.MIGS, requestMemory uint) (bool, int, uint) {
 	type MigTemplateWithIndex struct {
 		Index    int
@@ -206,6 +243,14 @@ func pickFromGroup(group config.Geometry, usage config.MIGS, requestMemory uint)
 	return false, -1, 0
 }
 
+// getPosition 计算某个 MIG 实例在 group 中的全局 position。
+//
+// position 的计算方式：
+//   - 先累加该实例之前所有类型实例的数量。
+//   - 再在该类型实例中找一个未被使用的索引 i，累加 i。
+//
+// 例如 group 包含 3 个 2g.20gb 和 1 个 1g.10gb，
+// 则 1g.10gb 的类型索引为 1，前面类型数量为 3，若其第一个实例未被使用，则 position = 3 + 0 = 3。
 func getPosition(group config.Geometry, count int, usedIndex []int, index int) int {
 	position := 0
 	for i := 0; i < index; i++ {
@@ -229,6 +274,7 @@ func getPosition(group config.Geometry, count int, usedIndex []int, index int) i
 	return position
 }
 
+// findPosition 根据全局 position 反推其在 group 中的类型索引和资源索引。
 func findPosition(group config.Geometry, position int) (instanceIndex, resourceIndex int) {
 	sum := 0
 	for i, instance := range group.Instances {
@@ -240,10 +286,15 @@ func findPosition(group config.Geometry, position int) (instanceIndex, resourceI
 	return -1, -1
 }
 
+// encodeMIGID 将物理 GPU UUID、group 名称和 position 编码为 MIG 实例 ID。
+//
+// 格式：UUID[group-position]
+// 例如：GPU-0fc3eda5-e98b-a25b-5b0d-cf5c855d1448[group2-3]
 func encodeMIGID(uuid, group string, position int) string {
 	return fmt.Sprintf("%s[%s-%d]", uuid, group, position)
 }
 
+// decodeMIGID 从 MIG 实例 ID 中解析出 group 名称和 position。
 func decodeMIGID(id string) (group string, position int, err error) {
 	// Find the opening bracket
 	start := strings.Index(id, "[")
@@ -268,6 +319,13 @@ func decodeMIGID(id string) (group string, position int, err error) {
 	return group, position, nil
 }
 
+// addMigUsed 标记某个 MIG 实例已被占用，并返回其实际显存。
+//
+// 流程：
+//  1. 根据 groupName 找到对应的 group 模板。
+//  2. 根据 position 找到具体实例类型和资源索引。
+//  3. 更新 MigUsage.UsageList，将该资源索引加入 UsedIndex。
+//  4. 返回该实例类型的显存容量。
 func addMigUsed(gd *GPUDevice, groupName string, position int) uint {
 	for groupIndex, group := range gd.MigTemplate {
 		if group.Group == groupName {
@@ -295,6 +353,13 @@ func addMigUsed(gd *GPUDevice, groupName string, position int) uint {
 	return 0
 }
 
+// subMigUsed 回收某个 MIG 实例，并返回其实际显存。
+//
+// 流程：
+//  1. 根据 groupName 找到对应 group 模板。
+//  2. 根据 position 找到具体实例类型和资源索引。
+//  3. 从 MigUsage.UsageList 对应类型的 UsedIndex 中移除该资源索引。
+//  4. 若某类型实例全部释放，则从 UsageList 中删除该类型。
 func subMigUsed(gd *GPUDevice, groupName string, position int) uint {
 	for groupIndex, group := range gd.MigTemplate {
 		if group.Group == groupName {
@@ -319,7 +384,9 @@ func subMigUsed(gd *GPUDevice, groupName string, position int) uint {
 	return 0
 }
 
-// Insert a value in order
+// insert 将一个资源索引按升序插入 UsedIndex 列表。
+//
+// 若该索引已存在，说明出现重复分配，打印错误并返回原列表。
 func insert(list []int, value int) []int {
 	klog.V(4).Infoln("insert mig used list before: ", list, value)
 	// Find the correct index to insert
@@ -340,7 +407,7 @@ func insert(list []int, value int) []int {
 	return list
 }
 
-// Remove first occurrence of a value
+// remove 从 UsedIndex 列表中移除第一个出现的 value。
 func remove(list []int, value int) []int {
 	klog.V(4).Info("remove mig used list before: ", list, value)
 	for i, v := range list {

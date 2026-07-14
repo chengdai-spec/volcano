@@ -23,6 +23,11 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 )
 
+// TestGetGPUMemoryOfPod 验证 getGPUMemoryOfPod 对普通容器与 Init 容器的显存计算规则。
+//
+// 测试覆盖：
+//   - 仅普通容器请求 gpu-memory：结果为各容器请求之和。
+//   - 同时存在 Init 容器与普通容器：Init 容器取最大值，再与普通容器总和取较大值。
 func TestGetGPUMemoryOfPod(t *testing.T) {
 	testCases := []struct {
 		name string
@@ -98,6 +103,11 @@ func TestGetGPUMemoryOfPod(t *testing.T) {
 	}
 }
 
+// TestGetGPUNumberOfPod 验证 getGPUNumberOfPod 对普通容器与 Init 容器的整卡数计算规则。
+//
+// 测试覆盖：
+//   - 仅普通容器请求 gpu-number：结果为各容器请求之和。
+//   - 同时存在 Init 容器与普通容器：Init 容器取最大值，再与普通容器总和取较大值。
 func TestGetGPUNumberOfPod(t *testing.T) {
 	testCases := []struct {
 		name string

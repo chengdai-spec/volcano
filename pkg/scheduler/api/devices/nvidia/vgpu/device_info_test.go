@@ -28,6 +28,12 @@ import (
 	"volcano.sh/volcano/pkg/scheduler/api/devices/config"
 )
 
+// TestGetGPUMemoryOfPod 验证 resourcereqs 能正确从 Pod 容器 limits 中提取 vGPU 请求。
+//
+// 测试场景：
+//   - 容器 1 请求 vgpu-number=1、vgpu-memory=3000
+//   - 容器 2 请求 vgpu-number=3、vgpu-memory=5000
+// 期望第一个容器 Nums=1、Memreq=3000；第二个容器 Nums=3、Memreq=5000。
 func TestGetGPUMemoryOfPod(t *testing.T) {
 	testCases := []struct {
 		name string
@@ -72,6 +78,12 @@ func TestGetGPUMemoryOfPod(t *testing.T) {
 	}
 }
 
+// TestAddResource 验证 addResource 能根据 Pod 注解将 Pod 正确加入对应 GPU 的 PodMap。
+//
+// 测试覆盖：
+//   - Pod 注解中的 UUID 与设备 UUID 匹配：Pod 应被加入 PodMap
+//   - Pod 注解中的 UUID 与设备 UUID 不匹配：Pod 不应被加入 PodMap
+//   - Pod 缺少 AssignedIDsAnnotations 注解：不应加入 PodMap
 func TestAddResource(t *testing.T) {
 	testCases := []struct {
 		name        string
@@ -165,6 +177,8 @@ func TestAddResource(t *testing.T) {
 	}
 }
 
+// TestAddResourceSetsPodGroupKey 验证带有 PodGroup 注解的 Pod 在被加入 GPU 时，
+// 其 GPUUsage.PodGroupKey 会被正确设置为 namespace/groupName 格式。
 func TestAddResourceSetsPodGroupKey(t *testing.T) {
 	// When a pod with a PodGroup annotation is added, the GPUUsage should have PodGroupKey set.
 	gs := &GPUDevices{
