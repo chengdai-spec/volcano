@@ -9,12 +9,27 @@ import (
 	"k8s.io/client-go/kubernetes"
 )
 
+// AscendMindClusterVNPUEnable 是命令行开关，控制是否启用 MindCluster 动态 vNPU 调度。
 var AscendMindClusterVNPUEnable bool
 
 const (
+	// DeviceName 是 MindCluster vNPU 设备名称，用于日志与报错。
 	DeviceName = "ascend310p-vNPU"
 )
 
+// NPUDevice 描述了一台节点上的昇腾 NPU 资源概况。
+//
+// 与 HAMi 不同，MindCluster 更关注“物理芯片 + 虚拟模板”两层模型：
+//  - VT:        当前芯片支持的 vNPU 模板表，例如 vir01/vir02/vir04 等；
+//  - Chips:     物理芯片 map，key 为芯片 ID；
+//  - ChipKind:  芯片大类，如 Ascend910/310/310P；
+//  - ServerType: 服务器类型，格式如 Ascend310P-10-dual（芯片-核心数-是否双槽）；
+//  - TotalChipNum/FreeChipNum: 总芯片数与空闲芯片数；
+//  - TotalRes:  节点总资源；
+//  - ValidVNode: 节点是否初始化成功；
+//  - ChipType:  具体芯片型号，如 910B1/910B2C；
+//  - DowngradeCache: 记录哪些 Pod 已经触发过 AI CPU 降级；
+//  - ConCache:  记录当前节点上各 vNPU 模板正在运行的 Pod UID，用于模板隔离策略。
 type NPUDevice struct {
 	VT VTemplate
 	// Chips map chipID to VChip class
@@ -45,6 +60,11 @@ type NPUDevice struct {
 	ConCache map[string]map[types.UID]struct{} //types.UID equals to pod.UID
 }
 
+// NodeInf 描述节点在 MindCluster 调度器中的资源视图。
+//
+// Capability/Allocate/Idle 分别记录节点 Capability、已分配、空闲资源，
+// 单位使用 float64 以兼容 Volcano 框架的 millicore 表示。
+// Annotation/Label 保存节点注解与标签，用于读取 device-info、健康状态等信息。
 type NodeInf struct {
 	Name       string
 	Capability map[v1.ResourceName]float64
@@ -61,12 +81,26 @@ type NodeInf struct {
 	DevInfoUpdateTime int64
 }
 
-// VTemplate vNPU template
+// VTemplate 表示某种昇腾芯片支持的 vNPU 模板集合。
+//
+// Data 的 key 是模板名（vir01/vir02/vir04...），value 是该模板对应的资源规格。
+// Temp 是芯片类型名。
 type VTemplate struct {
 	Data map[string]VResource
 	Temp string
 }
 
+// VChip 描述单张物理芯片的资源与占用状态。
+//
+// PodMap:      记录已绑定到该芯片的 Pod；
+// ID:          芯片真实 ID 列表，可能包含 vGroup 信息，如 Ascend310P-2c.1cpu-105-0_3；
+// Name:        芯片显示名称，如 Ascend910-0；
+// Kind:        芯片大类；
+// IsDual:      是否为双槽卡；
+// Unstable:    是否不稳定（故障/亚健康），不稳定芯片不可调度；
+// CoreNum:     核心数；
+// SegmentFlag: 是否已被切分（存在 vNPU 实例）；
+// TotalRes/UsedRes/FreeRes: 总/已用/空闲资源。
 type VChip struct {
 	PodMap map[string]*v1.Pod
 	ID     []string
@@ -82,6 +116,12 @@ type VChip struct {
 	UsedRes     VResource
 	FreeRes     VResource
 }
+
+// VResource 描述昇腾芯片的三种可分配资源。
+//
+// Aicore: AI Core 数量，对应算力；
+// Aicpu:  AI CPU 数量，对应控制面能力；
+// DVPP:   视频预处理能力开关（yes/no/null）。
 type VResource struct {
 	Aicore int
 	Aicpu  int
@@ -90,7 +130,9 @@ type VResource struct {
 
 type vChipsList []*VChip
 
-// VolcanoFrame passed in by the volcano frame.
+// VolcanoFrame 保存 Volcano 框架注入的依赖与配置。
+//
+// 包括 KubeClient、InformerFactory、任务模板映射以及静态/动态参数。
 type VolcanoFrame struct {
 	UID             types.UID
 	KubeClient      kubernetes.Interface
@@ -99,13 +141,13 @@ type VolcanoFrame struct {
 	ConfigParameters
 }
 
-// ConfigParameters some volcano scheduler parameters
+// ConfigParameters 汇总 MindCluster 调度器所需的静态与动态参数。
 type ConfigParameters struct {
 	StaticParameters
 	DynamicParameters
 }
 
-// StaticParameters volcano scheduler static parameters
+// StaticParameters 在调度器启动时确定，运行期间一般不改变。
 type StaticParameters struct {
 	OnceInit              *sync.Once
 	UseClusterD           bool
@@ -115,7 +157,7 @@ type StaticParameters struct {
 	IsFirstSession        *bool // scheduler first session message is unreliable
 }
 
-// DynamicParameters volcano scheduler dynamic parameters
+// DynamicParameters 可以在运行期通过 ConfigMap 等方式调整。
 type DynamicParameters struct {
 	PresetVirtualDevice bool
 	GraceDeleteTime     int64

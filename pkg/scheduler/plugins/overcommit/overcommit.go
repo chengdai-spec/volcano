@@ -207,7 +207,7 @@ func (op *overcommitPlugin) OnSessionOpen(ssn *framework.Session) {
 		if job.PodGroup.Spec.MinResources == nil {
 			return
 		}
-		// 将该 Job 的最小资源需求（扣除调度门控任务资源后）累加到已入队资源中
+		// 将该 Job 的最小资源需求(扣除调度门控任务资源后)累加到已入队资源中
 		jobMinReq := job.GetMinResources()
 		op.inqueueResource.Add(job.DeductSchGatedResources(jobMinReq))
 	})

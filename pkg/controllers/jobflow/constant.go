@@ -16,13 +16,17 @@ limitations under the License.
 
 package jobflow
 
+// 常量定义：用于标识 JobFlow 控制器中的资源类型和标签/注解键
 const (
-	// Volcano string of volcano apiVersion
+	// Volcano Volcano API Group 的标识字符串，用于判断 OwnerReference 的 APIVersion 是否属于 Volcano
 	Volcano = "volcano"
-	// JobFlow kind of jobFlow
+	// JobFlow JobFlow 资源的 Kind 名称，用于判断 OwnerReference 的 Kind 是否为 JobFlow
 	JobFlow = "JobFlow"
-	// CreatedByJobTemplate the vcjob annotation and label of created by jobTemplate
+	// CreatedByJobTemplate 标记 VCJob 是由哪个 JobTemplate 创建的标签/注解键
+	// 值格式："<namespace>.<jobTemplateName>"，例如 "default.my-template"
 	CreatedByJobTemplate = "volcano.sh/createdByJobTemplate"
-	// CreatedByJobFlow the vcjob annotation and label of created by jobFlow
+	// CreatedByJobFlow 标记 VCJob 是由哪个 JobFlow 创建的标签/注解键
+	// 值格式："<namespace>.<jobFlowName>"，例如 "default.my-jobflow"
+	// 同时也用于 Label Selector 查询某个 JobFlow 创建的所有子 Job
 	CreatedByJobFlow = "volcano.sh/createdByJobFlow"
 )

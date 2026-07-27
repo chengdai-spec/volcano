@@ -23,7 +23,11 @@ import (
 	"volcano.sh/volcano/pkg/controllers/util"
 )
 
+// Prometheus 指标定义
+// 用于监控 JobFlow 的成功/失败状态变化，按 namespace 维度统计
 var (
+	// jobflowSucceedPhaseCount JobFlow 成功状态计数器
+	// 当 JobFlow 从 Running 转为 Succeed 时递增
 	jobflowSucceedPhaseCount = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Subsystem: util.VolcanoSubSystemName,
@@ -32,6 +36,8 @@ var (
 		}, []string{"jobflow_namespace"},
 	)
 
+	// jobflowFailedPhaseCount JobFlow 失败状态计数器
+	// 当 JobFlow 从 Pending 或 Running 转为 Failed 时递增
 	jobflowFailedPhaseCount = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Subsystem: util.VolcanoSubSystemName,
@@ -41,14 +47,20 @@ var (
 	)
 )
 
+// UpdateJobFlowSucceed 递增指定 namespace 的 JobFlow 成功计数器
+// 在 runningState.Execute 中 JobFlow 转为 Succeed 时调用
 func UpdateJobFlowSucceed(namespace string) {
 	jobflowSucceedPhaseCount.WithLabelValues(namespace).Inc()
 }
 
+// UpdateJobFlowFailed 递增指定 namespace 的 JobFlow 失败计数器
+// 在 pendingState.Execute 中 JobFlow 转为 Failed 时调用
 func UpdateJobFlowFailed(namespace string) {
 	jobflowFailedPhaseCount.WithLabelValues(namespace).Inc()
 }
 
+// DeleteJobFlowMetrics 删除指定 namespace 的 JobFlow 指标数据
+// 用于清理已删除 namespace 的指标，避免指标泄漏
 func DeleteJobFlowMetrics(namespace string) {
 	jobflowSucceedPhaseCount.DeleteLabelValues(namespace)
 	jobflowFailedPhaseCount.DeleteLabelValues(namespace)

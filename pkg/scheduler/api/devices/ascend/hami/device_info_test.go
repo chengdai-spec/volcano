@@ -14,6 +14,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package hami 的单元测试覆盖了 trimMemory、fit、verifyReq 以及 AddResource 等核心逻辑。
+//
+// 测试使用的 config_yaml 定义了多套 Ascend vNPU 模板，包括：
+//  - Ascend910A: 30 AI Core、32GB 显存，模板 vir02/04/08/16；
+//  - Ascend910B2/B3/B4: 不同核心数与显存；
+//  - Ascend310P: 8 AI Core、约 21.5GB 可分配显存，模板 vir01/02/04。
+//
+// 这些模板对应生产环境中的常见昇腾芯片规格，测试主要验证显存向上取整、
+// 资源过滤、多设备请求约束以及缓存累加/去重是否正确。
 package hami
 
 import (
@@ -30,6 +39,8 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
+// config_yaml 是测试专用的 VNPU 配置字符串。
+// 其中 vnpus 段对应 HAMi Ascend 配置，nvidia 段仅用于 YAML 反序列化占位。
 var config_yaml = `
 vnpus:
 - chipName: 910A
@@ -178,6 +189,7 @@ nvidia:
           count: 1
 `
 
+// yamlStringToConfig 把 YAML 字符串反序列化为 config.Config。
 func yamlStringToConfig(yamlStr string) (*config.Config, error) {
 	var config config.Config
 	err := yaml.Unmarshal([]byte(yamlStr), &config)
@@ -187,6 +199,15 @@ func yamlStringToConfig(yamlStr string) (*config.Config, error) {
 	return &config, nil
 }
 
+// Test_trimMemory 验证显存向上取整逻辑。
+//
+// 使用 Ascend310P 配置：模板 3072、6144、12288，可分配显存 21527，容量 24576。
+// 用例覆盖：
+//  - 0、1、3071 都应对齐到最小模板 3072；
+//  - 3073~6144 对齐到 6144；
+//  - 6145~12288 对齐到 12288；
+//  - 12289~21527 对齐到可分配显存 21527；
+//  - 21528 及以上超出容量，返回 0。
 func Test_trimMemory(t *testing.T) {
 	conf, err := yamlStringToConfig(config_yaml)
 	assert.Nil(t, err)
@@ -223,6 +244,15 @@ func Test_trimMemory(t *testing.T) {
 	}
 }
 
+// Test_fit 验证单卡资源过滤逻辑。
+//
+// 构造一张 Ascend310P 卡：Count=7、Devmem=21527、Devcore=8，已用 1 实例/3072MB。
+// 用例覆盖：
+//  - 请求 1024MB：trim 后 3072MB，剩余足够，返回 true；
+//  - 请求 21527MB：trim 后整卡，但已用 3072MB，剩余不足，返回 false；
+//  - 请求 6144MB：trim 后 6144MB，剩余够，返回 true；
+//  - 请求 24576MB：超过容量，返回 false；
+//  - 请求 6144MB + 4 Core：已用 6 Core，剩余 2 Core 不够 4 Core，返回 false。
 func Test_fit(t *testing.T) {
 	conf, err := yamlStringToConfig(config_yaml)
 	assert.Nil(t, err)
@@ -336,6 +366,13 @@ func Test_fit(t *testing.T) {
 	}
 }
 
+// Test_verifyReq 验证多设备请求时的显存约束。
+//
+// 关键规则：请求多张卡时，trim 后的显存必须等于 MemoryAllocatable（整卡）。
+// 用例覆盖：
+//  - 单卡部分显存：通过；
+//  - 多卡部分显存：失败；
+//  - 多卡整卡显存：通过。
 func Test_verifyReq(t *testing.T) {
 	conf, err := yamlStringToConfig(config_yaml)
 	assert.Nil(t, err)
@@ -393,6 +430,14 @@ func Test_verifyReq(t *testing.T) {
 	}
 }
 
+// TestAscendDevices_AddResource 验证 AddResource 对缓存的正确更新。
+//
+// 通过构造模拟的 AscendDevices 与已分配注解，测试：
+//  - 单卡、多卡累加；
+//  - 同 Pod 多次 Add 不重复；
+//  - 已有占用的卡继续累加；
+//  - 非法注解/缺失注解/设备不存在时保持原状；
+//  - nil receiver 不 panic。
 func TestAscendDevices_AddResource(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -605,6 +650,7 @@ func TestAscendDevices_AddResource(t *testing.T) {
 	}
 }
 
+// createTestAscendDevices 构造测试用的 AscendDevices。
 func createTestAscendDevices(nodeName, deviceType string, devices map[string]*AscendDevice) *AscendDevices {
 	return &AscendDevices{
 		NodeName: nodeName,
@@ -614,6 +660,16 @@ func createTestAscendDevices(nodeName, deviceType string, devices map[string]*As
 	}
 }
 
+// createTestAscendDevice 构造测试用的单张 AscendDevice。
+//
+// 参数说明：
+//  id:          设备 UUID；
+//  totalCores:  总 AI Core 数；
+//  totalMem:    总显存；
+//  used:        已用实例数；
+//  usedmem:     已用显存；
+//  usedcores:   已用 AI Core；
+//  existingPods: 已存在的 Pod 占用记录。
 func createTestAscendDevice(id string, totalCores, totalMem int32, used, usedmem, usedcores int32, existingPods map[string]*devices.DeviceUsage) *AscendDevice {
 	device := &AscendDevice{
 		DeviceInfo: &devices.DeviceInfo{
@@ -649,6 +705,7 @@ func createTestAscendDevice(id string, totalCores, totalMem int32, used, usedmem
 	return device
 }
 
+// createTestPod 构造测试用的 Pod。
 func createTestPod(name, namespace string, annotations map[string]string) *v1.Pod {
 	return &v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -667,6 +724,7 @@ func createTestPod(name, namespace string, annotations map[string]string) *v1.Po
 	}
 }
 
+// getTestUID 生成稳定的测试用 Pod UID。
 func getTestUID(podName string) types.UID {
 	return types.UID(podName + "-uid-1234")
 }

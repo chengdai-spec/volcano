@@ -18,18 +18,26 @@ package state
 
 import "volcano.sh/apis/pkg/apis/flow/v1alpha1"
 
+// runningState 运行中状态
+// 表示 JobFlow 中至少有一个子 Job 正在运行或已完成，且没有失败的 Job
 type runningState struct {
 	jobFlow *v1alpha1.JobFlow
 }
 
+// Execute 在 Running 状态下执行同步动作
+// 调用 SyncJobFlow 同步子 Job 状态，并根据结果决定状态流转：
+//   - 所有 Job 都已完成 → 转为 Succeed，并更新成功指标
+//   - 有 Job 失败 → 转为 Failed
+//   - 其他情况 → 保持 Running
 func (p *runningState) Execute(action v1alpha1.Action) error {
 	switch action {
 	case v1alpha1.SyncJobFlowAction:
 		return SyncJobFlow(p.jobFlow, func(status *v1alpha1.JobFlowStatus, allJobList int) {
 			if len(status.CompletedJobs) == allJobList {
+				// 所有 Job 都已完成
 				UpdateJobFlowSucceed(p.jobFlow.Namespace)
 				status.State.Phase = v1alpha1.Succeed
-			} else if len(status.FailedJobs) > 0 { // TODO(dongjiang199) Modify it when the if condition judgment is implemented
+			} else if len(status.FailedJobs) > 0 { // TODO(dongjiang1989) 待完善失败条件判断
 				status.State.Phase = v1alpha1.Failed
 			}
 		})

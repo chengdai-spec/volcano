@@ -25,10 +25,15 @@ import (
 	"volcano.sh/volcano/pkg/controllers/apis"
 )
 
+// enqueue 将 FlowRequest 放入工作队列
+// 是控制器内部统一的入队函数，由各个事件处理器调用
 func (jf *jobflowcontroller) enqueue(req apis.FlowRequest) {
 	jf.queue.Add(req)
 }
 
+// addJobFlow JobFlow 创建事件的处理函数
+// 当新的 JobFlow 被创建时，生成 SyncJobFlowAction 请求并放入工作队列，
+// 触发控制器开始按依赖顺序部署 Job
 func (jf *jobflowcontroller) addJobFlow(obj interface{}) {
 	jobFlow, ok := obj.(*jobflowv1alpha1.JobFlow)
 	if !ok {
@@ -36,7 +41,7 @@ func (jf *jobflowcontroller) addJobFlow(obj interface{}) {
 		return
 	}
 
-	// use struct instead of pointer
+	// 使用值类型而非指针，确保工作队列中的对象不会被意外修改
 	req := apis.FlowRequest{
 		Namespace:   jobFlow.Namespace,
 		JobFlowName: jobFlow.Name,
@@ -48,6 +53,10 @@ func (jf *jobflowcontroller) addJobFlow(obj interface{}) {
 	jf.enqueueJobFlow(req)
 }
 
+// updateJobFlow JobFlow 更新事件的处理函数
+// 仅在 JobFlow 已成功(Succeed)且保留策略为 Delete 时才触发同步，
+// 用于处理 JobFlow 完成后删除子 Job 的场景
+// TODO: 当前 JobFlow 的更新操作预留为未来使用，普通的更新不会影响 JobFlow 流程
 func (jf *jobflowcontroller) updateJobFlow(oldObj, newObj interface{}) {
 	oldJobFlow, ok := oldObj.(*jobflowv1alpha1.JobFlow)
 	if !ok {
@@ -61,11 +70,12 @@ func (jf *jobflowcontroller) updateJobFlow(oldObj, newObj interface{}) {
 		return
 	}
 
+	// ResourceVersion 相同说明是重复事件，跳过
 	if newJobFlow.ResourceVersion == oldJobFlow.ResourceVersion {
 		return
 	}
 
-	//Todo The update operation of JobFlow is reserved for possible future use. The current update operation on JobFlow will not affect the JobFlow process
+	// 仅在 JobFlow 已成功且保留策略为 Delete 时才触发同步(用于清理子 Job)
 	if newJobFlow.Status.State.Phase != jobflowv1alpha1.Succeed || newJobFlow.Spec.JobRetainPolicy != jobflowv1alpha1.Delete {
 		return
 	}
@@ -81,6 +91,9 @@ func (jf *jobflowcontroller) updateJobFlow(oldObj, newObj interface{}) {
 	jf.enqueueJobFlow(req)
 }
 
+// updateJob VCJob 更新事件的处理函数
+// 当子 Job 状态发生变化时，触发其父 JobFlow 的同步，以更新 JobFlow 的整体状态
+// 仅处理由 JobFlow 创建的 Job（通过 OwnerReference 判断）
 func (jf *jobflowcontroller) updateJob(oldObj, newObj interface{}) {
 	oldJob, ok := oldObj.(*batch.Job)
 	if !ok {
@@ -94,15 +107,17 @@ func (jf *jobflowcontroller) updateJob(oldObj, newObj interface{}) {
 		return
 	}
 
-	// Filter out jobs that are not created from volcano jobflow
+	// 过滤非 JobFlow 创建的 Job（检查 OwnerReference 是否指向 JobFlow）
 	if !isControlledBy(newJob, helpers.JobFlowKind) {
 		return
 	}
 
+	// ResourceVersion 相同说明是重复事件，跳过
 	if newJob.ResourceVersion == oldJob.ResourceVersion {
 		return
 	}
 
+	// 从 Job 的 OwnerReference 中提取父 JobFlow 的名称
 	jobFlowName := getJobFlowNameByJob(newJob)
 	if jobFlowName == "" {
 		return

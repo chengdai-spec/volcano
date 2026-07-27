@@ -18,10 +18,15 @@ package state
 
 import "volcano.sh/apis/pkg/apis/flow/v1alpha1"
 
+// failedState 失败状态
+// 表示 JobFlow 中有子 Job 失败，是终态之一
+// 当前为预留实现，Execute 方法不做任何操作
 type failedState struct {
 	jobFlow *v1alpha1.JobFlow
 }
 
+// Execute 在 Failed 状态下执行同步动作
+// 当前直接返回 nil（终态，不做进一步处理）
 func (p *failedState) Execute(action v1alpha1.Action) error {
 	return nil
 }

@@ -18,10 +18,15 @@ package state
 
 import "volcano.sh/apis/pkg/apis/flow/v1alpha1"
 
+// terminatingState 终止中状态
+// 表示 JobFlow 正在被终止，是预留状态
+// 当前为预留实现，Execute 方法不做任何操作
 type terminatingState struct {
 	jobFlow *v1alpha1.JobFlow
 }
 
+// Execute 在 Terminating 状态下执行同步动作
+// 当前直接返回 nil（预留状态，不做进一步处理）
 func (p *terminatingState) Execute(action v1alpha1.Action) error {
 	return nil
 }

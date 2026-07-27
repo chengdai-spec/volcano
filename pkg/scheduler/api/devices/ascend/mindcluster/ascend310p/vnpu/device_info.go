@@ -14,6 +14,29 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package vnpu 实现了 Volcano 对华为 MindCluster 动态 vNPU 的调度支持。
+//
+// 与 hami 包（通用 Ascend vNPU）相比，mindcluster 包更贴近华为 MindCluster 生态：
+//  - 使用 label "ring-controller.atlas=ascend-310P" 识别 Ascend310P 推理任务；
+//  - 使用资源名 "huawei.com/npu-core" 表达 AI Core 数量需求；
+//  - 通过 vNPU 模板（vir01/vir02/vir04 等）动态切分物理芯片；
+//  - 支持 AI CPU 降级、DVPP 开关、模板隔离、整卡与切分混合调度。
+//
+// 实际案例：
+//  某在线推理服务部署在 Ascend310P 集群，Pod 声明：
+//    labels:
+//      ring-controller.atlas: ascend-310P
+//      vnpu-level: low
+//      vnpu-dvpp: "null"
+//    resources.limits:
+//      huawei.com/npu-core: "2"
+//  调度器会：
+//    (1) HasDeviceRequest 识别出这是 MindCluster vNPU 任务；
+//    (2) GetPodResource 把 2 核 + low + null 映射为 vir02_1c 模板资源；
+//    (3) CheckNodeNPUByDyPod 检查节点是否有芯片满足 Aicore/Aicpu/DVPP/vGroup 约束；
+//    (4) 若资源不足但可降级，把任务 AI CPU 从 2 降到 1；
+//    (5) SelectChipFromNode 选择剩余资源最少的芯片，通过 JSON Patch 把
+//        "huawei.com/npu-core" 注解写成 "0-vir02_1c"，设备插件据此创建 vNPU。
 package vnpu
 
 import (
@@ -29,6 +52,16 @@ import (
 	"volcano.sh/volcano/pkg/scheduler/api/devices"
 )
 
+// NPUDevices 是 MindCluster vNPU 调度器在 Volcano 中的封装。
+//
+// 它聚合了：
+//  - Name:      节点名；
+//  - NodeInf:   节点资源视图（Capability/Allocate/Idle 等）；
+//  - NPUDevice: 昇腾 NPU 物理芯片与 vNPU 模板信息；
+//  - FrameAttr: Volcano 框架注入的客户端、informer、配置参数。
+//
+// NPUDevices 实现了 deviceShare 插件要求的设备接口：AddResource、SubResource、
+// FilterNode、ScoreNode、Allocate、DeepCopy 等。
 type NPUDevices struct { //schedulerHandler, including all the scheduler cache
 	Name string
 
@@ -39,6 +72,15 @@ type NPUDevices struct { //schedulerHandler, including all the scheduler cache
 	FrameAttr VolcanoFrame
 }
 
+// NewNPUDevices 构造一个空的 NPUDevices。
+//
+// 初始化时会：
+//  - 构造空的 NodeInf（Capability/Allocate/Idle 等 map）；
+//  - 预置 Ascend310P 的 vNPU 模板表；
+//  - 初始化物理芯片 map、不健康芯片集合、降级缓存、并发任务缓存；
+//  - 初始化 VolcanoFrame 中的静态参数（OnceInit、IsFirstSession 等）。
+//
+// 注意：这里只是构造空壳，真实芯片信息通常由上层在节点同步时填充。
 func NewNPUDevices(name string, node *v1.Node) *NPUDevices {
 	return &NPUDevices{
 		Name: name,
@@ -80,7 +122,15 @@ func NewNPUDevices(name string, node *v1.Node) *NPUDevices {
 	}
 }
 
-// AddResource adds the pod to NPU pool if it is assigned
+// AddResource 在 Pod 调度到节点后，把其占用的 vNPU 资源累加到本地缓存。
+//
+// 流程：
+//  1. 通过 HasDeviceRequest 过滤非 vNPU Pod；
+//  2. GetPodResource 解析 Pod 需要的 VResource；
+//  3. 读取 Pod 注解 AscendNPUCore，格式为 "chipID" 或 "chipID-template"；
+//  4. 若是切分任务，调用 UpdateNodeInfoSegmentWithAdd 更新芯片资源并设置 SegmentFlag；
+//     若是整卡任务，调用 UpdateNodeInfoWholeWithAdd 扣除整张卡的资源；
+//  5. 把 Pod UID 加入 ConCache，用于模板隔离。
 func (ns *NPUDevices) AddResource(pod *v1.Pod) {
 	if !ns.HasDeviceRequest(pod) {
 		return
@@ -115,7 +165,11 @@ func (ns *NPUDevices) AddResource(pod *v1.Pod) {
 	}
 }
 
-// SubResource frees the npu hold by the pod
+// SubResource 在 Pod 删除或释放时，把其占用的 vNPU 资源从本地缓存释放。
+//
+// 逻辑与 AddResource 对称：根据 AscendNPUCore 注解判断是切分还是整卡，
+// 分别调用 UpdateNodeInfoSegmentWithSub / UpdateNodeInfoWholeWithSub，
+// 并从 ConCache 中移除 Pod UID。
 func (ns *NPUDevices) SubResource(pod *v1.Pod) {
 	if !ns.HasDeviceRequest(pod) {
 		return
@@ -150,10 +204,17 @@ func (ns *NPUDevices) SubResource(pod *v1.Pod) {
 	}
 }
 
+// AddQueueResource 返回队列资源增量，当前 MindCluster vNPU 未实现。
 func (ns *NPUDevices) AddQueueResource(pod *v1.Pod) map[string]float64 {
 	return map[string]float64{}
 }
 
+// HasDeviceRequest 判断 Pod 是否请求了 MindCluster vNPU。
+//
+// 只有当 AscendMindClusterVNPUEnable 开启，且 Pod 同时满足：
+//  - label "ring-controller.atlas" == "ascend-310P"；
+//  - 容器 limits 中包含 "huawei.com/npu-core"；
+// 才返回 true。
 func (ns *NPUDevices) HasDeviceRequest(pod *v1.Pod) bool {
 	if AscendMindClusterVNPUEnable && checkVNPUResourcesInPod(pod) {
 		return true
@@ -161,6 +222,12 @@ func (ns *NPUDevices) HasDeviceRequest(pod *v1.Pod) bool {
 	return false
 }
 
+// FilterNode 是 deviceShare 插件的节点过滤入口。
+//
+// 执行两步检查：
+//  1. preCheckNodePredicate：检查节点是否处于 PreSeparate 等不可用状态、节点芯片数是否足够；
+//  2. CheckNodeNPUByPod：检查是否存在满足资源、DVPP、vGroup、模板隔离的芯片。
+// 任意一步失败即返回 devices.Error。
 func (ns *NPUDevices) FilterNode(pod *v1.Pod, schedulePolicy string) (int, string, error) {
 	if err := ns.preCheckNodePredicate(pod); err != nil {
 		return devices.Error, "preCheckNodePredicate failure", err
@@ -174,11 +241,20 @@ func (ns *NPUDevices) FilterNode(pod *v1.Pod, schedulePolicy string) (int, strin
 	return devices.Success, "", nil
 }
 
+// ScoreNode 返回节点得分，当前 MindCluster vNPU 把排序策略交给 deviceShare 插件处理，
+// 因此直接返回 0。
 func (ns *NPUDevices) ScoreNode(pod *v1.Pod, schedulePolicy string) float64 {
 	// implement in deviceShare plugin score policy
 	return 0
 }
 
+// Allocate 为 Pod 实际分配芯片并通过 JSON Patch 写回 Pod 注解。
+//
+// 流程：
+//  1. 解析 Pod 资源需求 VResource；
+//  2. 若该 Pod 在 DowngradeCache 中，调用 downgradeTaskAICPU 降级 AI CPU；
+//  3. SelectChipFromNode 选择最佳芯片；
+//  4. SetNPUTopologyToPodFn 把分配结果（"chipID" 或 "chipID-template"）通过 Patch 写入 Pod。
 func (ns *NPUDevices) Allocate(kubeClient kubernetes.Interface, pod *v1.Pod) error {
 	klog.V(4).Infoln("DeviceSharing:Into AllocateToPod", pod.Name)
 	if ns == nil {
@@ -207,10 +283,12 @@ func (ns *NPUDevices) Allocate(kubeClient kubernetes.Interface, pod *v1.Pod) err
 	return nil
 }
 
+// Release 预留接口，当前 MindCluster vNPU 未实现显式释放，资源扣减由 SubResource 处理。
 func (ns *NPUDevices) Release(kubeClient kubernetes.Interface, pod *v1.Pod) error {
 	return nil
 }
 
+// GetStatus 返回设备状态字符串，当前未实现。
 func (ns *NPUDevices) GetStatus() string {
 	return ""
 }
@@ -220,7 +298,10 @@ func (ns *NPUDevices) GetIgnoredDevices() []string {
 	return []string{""}
 }
 
-// DeepCopy returns a deep copy of NPUDevices for use in dry-run simulation.
+// DeepCopy 返回 NPUDevices 的深拷贝，用于 deviceShare 插件的 dry-run 模拟。
+//
+// 深拷贝会递归复制 NodeInf 中的各类 map、NPUDevice 中的芯片、模板、缓存等，
+// 避免模拟调度污染真实缓存。
 func (ns *NPUDevices) DeepCopy() interface{} {
 	if ns == nil {
 		return nil

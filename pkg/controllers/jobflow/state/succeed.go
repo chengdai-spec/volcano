@@ -18,10 +18,15 @@ package state
 
 import "volcano.sh/apis/pkg/apis/flow/v1alpha1"
 
+// succeedState 成功状态
+// 表示 JobFlow 中所有子 Job 都已成功完成，是终态之一
 type succeedState struct {
 	jobFlow *v1alpha1.JobFlow
 }
 
+// Execute 在 Succeed 状态下执行同步动作
+// 仍然调用 SyncJobFlow 保持状态同步（用于更新子 Job 状态信息），
+// 但不再改变 JobFlow 的 Phase（因为已经是终态）
 func (p *succeedState) Execute(action v1alpha1.Action) error {
 	switch action {
 	case v1alpha1.SyncJobFlowAction:

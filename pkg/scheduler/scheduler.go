@@ -88,7 +88,6 @@ func NewScheduler(config *rest.Config, opt *options.ServerOption) (*Scheduler, e
 		dumper:             schedcache.Dumper{Cache: cache, RootDir: opt.CacheDumpFileDir},
 		disableDefaultConf: opt.DisableDefaultSchedulerConfig,
 	}
-
 	return scheduler, nil
 }
 
