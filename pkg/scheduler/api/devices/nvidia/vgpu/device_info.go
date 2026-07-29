@@ -16,6 +16,30 @@ limitations under the License.
 
 package vgpu
 
+// ──────────────────────────────────────────────────────────────────────────────
+// device_info.go  —— vgpu 的 GPU 设备数据结构与 api.Devices 接口实现
+//
+// ╔═══════════════════════════════════════════════════════════════════════════╗
+// ║ 核心设计思想：                                                            ║
+// ║                                                                          ║
+// ║  vgpu 依赖 HAMi device plugin 上报真实物理 GPU 信息。                   ║
+// ║  每块 GPU 包含 UUID、型号、健康状态、槽位数、MIG 模板等完整物理属性。  ║
+// ║  通过 SharingFactory 工厂接口解耦不同共享模式的资源管理逻辑。          ║
+// ║                                                                          ║
+// ║  与 gpushare 对比：                                                        ║
+// ║  ─────────────────────────────────────────────────────────────────────────╢
+// ║  gpushare 是“无状态”的轻量方案：                                       ║
+// ║    - 从 Capacity 推算逻辑 GPU，不知道 UUID/型号                     ║
+// ║    - 每次过滤时遍历 PodMap 重新计算已用显存                          ║
+// ║    - 无打分、无策略、无共享模式                                      ║
+// ║                                                                          ║
+// ║  vgpu 是“有状态”的完整方案：                                           ║
+// ║    - 从 HAMi 注解解析物理 GPU，知道 UUID/型号/健康/槽位              ║
+// ║    - 实时维护 UsedNum/UsedMem/UsedCore，过滤时直接读取               ║
+// ║    - 支持 binpack/spread 策略、打分、型号过滤、PodGroup Spread      ║
+// ╚═══════════════════════════════════════════════════════════════════════════╝
+// ──────────────────────────────────────────────────────────────────────────────
+
 import (
 	"strconv"
 	"strings"
@@ -32,6 +56,10 @@ import (
 )
 
 // GPUUsage 描述一个 Pod 在单块 GPU 上的资源使用情况。
+//
+// 与 gpushare 对比：
+//   - gpushare 没有等价结构，PodMap 直接存 *v1.Pod，每次通过 Pod.Spec 反查资源
+//   - vgpu 用 GPUUsage 显式记录 UsedMem/UsedCore/PodGroupKey，避免重复解析
 type GPUUsage struct {
 	// UsedMem 是该 Pod 在该 GPU 上占用的显存（MiB）。
 	UsedMem uint
@@ -44,8 +72,20 @@ type GPUUsage struct {
 
 // GPUDevice 描述 vGPU 模式下的一块物理 GPU 及其共享状态。
 //
-// 与 gpushare 不同，vgpu 的 GPUDevice 来自设备插件（如 HAMi）上报的真实物理设备信息，
-// 包含 UUID、型号、健康状态、最大共享槽位数等字段。
+// 与 gpushare 对比：
+//   - gpushare.GPUDevice 只有 3 个字段（ID / Memory / PodMap）
+//   - vgpu.GPUDevice 有 13 个字段，完整描述物理 GPU 的所有属性
+//   - 新增字段说明：
+//     UUID:         GPU 全局唯一标识，由 HAMi 上报
+//     Node:         GPU 所在节点名
+//     Number:       最大共享槽位数（如 HAMi 将一块 GPU 划分为 10 份）
+//     Type:         GPU 型号（如 "Tesla-A100-SXM4-40GB"）
+//     Health:       GPU 是否健康，由 HAMi 实时上报
+//     UsedNum:      当前已占用的槽位数，由 Sharing.AddPod/SubPod 实时维护
+//     UsedMem:      当前已占用的显存总量
+//     UsedCore:     当前已占用的核心数百分比总和
+//     MigTemplate:  MIG 模式下该 GPU 支持的几何切分模板
+//     MigUsage:     MIG 模式下各实例的占用情况
 type GPUDevice struct {
 	// ID 是 GPU 在该节点内的索引。
 	ID int
@@ -77,6 +117,12 @@ type GPUDevice struct {
 }
 
 // GPUDevices 描述一个节点上的所有 vGPU 设备集合。
+//
+// 与 gpushare.GPUDevices 对比：
+//   - gpushare 仅含 Name + Device 两个字段
+//   - vgpu 额外含 Mode（共享模式：hami-core/mig/mps）、
+//     Score（FilterNode 阶段缓存的打分，供 ScoreNode 直接返回）、
+//     Sharing（共享策略工厂，解耦不同模式的资源管理）
 type GPUDevices struct {
 	// Name 是节点名。
 	Name string
@@ -105,6 +151,15 @@ func NewGPUDevice(id int, mem uint) *GPUDevice {
 
 // NewGPUDevices 根据节点注解和 Allocatable 资源构建该节点的 vGPU 视图。
 //
+// 与 gpushare.NewGPUDevices 对比：
+//   - gpushare: 从节点 Capacity 的 gpu-memory/gpu-number 推算逻辑 GPU
+//   - vgpu:     从节点注解 volcano.sh/vgpu-register 解析 HAMi 上报的物理 GPU
+//     并检查 Allocatable 中 vgpu-number/vgpu-cores/vgpu-memory 是否存在
+//   - gpushare 不依赖任何外部设备插件
+//   - vgpu 必须安装 HAMi device plugin 才能工作
+//   - gpushare 创建的是等显存的逻辑 GPU
+//   - vgpu 创建的是带 UUID/型号/槽位的物理 GPU
+//
 // 构建逻辑：
 //  1. 读取节点注解 volcano.sh/vgpu-register，获取由设备插件上报的物理 GPU 信息。
 //  2. 检查节点 Allocatable 中是否存在 volcano.sh/vgpu-number、volcano.sh/vgpu-cores、
@@ -116,7 +171,9 @@ func NewGPUDevice(id int, mem uint) *GPUDevice {
 //
 // 实际案例：
 // 某节点由 HAMi device plugin 上报注解：
-//   volcano.sh/vgpu-register: "GPU-xxx1,10,40960,A100-SXM4-40GB,true,hami-core:GPU-xxx2,..."
+//
+//	volcano.sh/vgpu-register: "GPU-xxx1,10,40960,A100-SXM4-40GB,true,hami-core:GPU-xxx2,..."
+//
 // 并且节点 Allocatable 包含 vgpu-number=20、vgpu-memory=819200、vgpu-cores=2000，
 // 则本函数会构建出两块物理 GPU，每块 Number=10、Memory=40960，模式为 hami-core。
 func NewGPUDevices(name string, node *v1.Node) *GPUDevices {
@@ -169,6 +226,11 @@ func NewGPUDevices(name string, node *v1.Node) *GPUDevices {
 
 // ScoreNode 返回该节点在 vGPU 维度上的打分。
 //
+// 与 gpushare.ScoreNode 对比：
+//   - gpushare: 始终返回 0，无打分逻辑
+//   - vgpu:     返回 FilterNode 阶段缓存的 gs.Score
+//     不同节点得分不同，支持 binpack（已用多的优先）/ spread（空闲多的优先）
+//
 // 为兼容抢占场景，分数在 FilterNode 阶段已经计算并缓存到 gs.Score 中，
 // 此处直接返回缓存值，避免重复遍历设备。
 func (gs *GPUDevices) ScoreNode(pod *v1.Pod, schedulePolicy string) float64 {
@@ -216,6 +278,13 @@ func (gs *GPUDevices) AddQueueResource(pod *v1.Pod) map[string]float64 {
 }
 
 // AddResource 在调度器初始化节点缓存时，将已分配到该节点的 Pod 加入 vGPU 占用视图。
+//
+// 与 gpushare.AddResource 对比：
+//   - gpushare: 从 Pod 注解 gpu-index 获取 ID，将 *v1.Pod 放入 PodMap
+//   - vgpu:     从 Pod 注解 vgpu-ids-new 解码 UUID+显存+核心，调用 Sharing.AddPod
+//     更新 UsedNum/UsedMem/UsedCore，并同步更新 Prometheus 指标
+//   - gpushare 不跟踪 UsedMem/UsedCore，每次过滤时重新计算
+//   - vgpu 实时维护 UsedMem/UsedCore/UsedNum，过滤时直接读取
 //
 // 它通过读取 Pod 注解 volcano.sh/vgpu-ids-new，找到对应 UUID 的 GPU，
 // 然后调用 Sharing.AddPod 更新设备的 UsedNum、UsedMem、UsedCore 以及 PodMap。
@@ -290,6 +359,10 @@ func (gs *GPUDevices) addToPodMap(annotations map[string]string, pod *v1.Pod) {
 
 // SubResource 将 Pod 从 vGPU 占用视图中释放。
 //
+// 与 gpushare.SubResource 对比：
+//   - gpushare: 仅从 PodMap 中删除 Pod UID
+//   - vgpu:     调用 Sharing.SubPod 回收 UsedNum/UsedMem/UsedCore，并更新 Prometheus 指标
+//
 // 根据 Pod 注解找到对应 UUID 的 GPU，调用 Sharing.SubPod 回收资源，
 // 并同步更新 Prometheus 指标。
 func (gs *GPUDevices) SubResource(pod *v1.Pod) {
@@ -330,6 +403,11 @@ func (gs *GPUDevices) HasDeviceRequest(pod *v1.Pod) bool {
 
 // Release 在回滚路径中释放 Pod 占用的 vGPU 资源。
 //
+// 与 gpushare.Release 对比：
+//   - gpushare: 先 Patch 移除注解，再清理本地 PodMap，需要 kubeClient
+//   - vgpu:     直接调用 SubResource，由 Sharing.SubPod 清理资源 + 更新 metrics
+//     不需要 kubeClient，仅操作内存状态
+//
 // 对于 Pipelined 任务，NodeInfo 不会调用 SubResource，因此 Release 需要主动调用 SubResource
 // 以确保 GPU 占用状态被正确回收。
 func (gs *GPUDevices) Release(kubeClient kubernetes.Interface, pod *v1.Pod) error {
@@ -340,6 +418,13 @@ func (gs *GPUDevices) Release(kubeClient kubernetes.Interface, pod *v1.Pod) erro
 }
 
 // FilterNode 在 predicate 阶段检查 Pod 是否能放入该节点的 vGPU 资源。
+//
+// 与 gpushare.FilterNode 对比：
+//   - gpushare: 分别检查显存和卡数，无打分，成功时直接返回
+//   - vgpu:     调用 checkNodeGPUSharingPredicateAndScore 进行完整的模拟分配
+//     同时检查槽位、核心、型号、PodGroup Spread 等约束，并计算打分缓存到 gs.Score
+//   - gpushare 的过滤是简单的“够不够”判断
+//   - vgpu 的过滤是复杂的“最优分配 + 打分”过程
 //
 // 调用 checkNodeGPUSharingPredicateAndScore 进行模拟分配（replicate=true），
 // 若成功则将计算出的 score 缓存到 gs.Score，供 ScoreNode 直接使用。
@@ -358,6 +443,14 @@ func (gs *GPUDevices) FilterNode(pod *v1.Pod, schedulePolicy string) (int, strin
 }
 
 // Allocate 在调度决策后，为 Pod 实际分配 vGPU 并通过 Patch 写入注解。
+//
+// 与 gpushare.Allocate 对比：
+//   - gpushare: 写入 2 个注解（gpu-index + predicate-time），使用 JSON Patch
+//   - vgpu:     写入 6 个注解，使用 StrategicMergePatch
+//   - gpushare: 无防重复分配检查
+//   - vgpu:     先检查 alreadyAssignedOnNode，避免重复分配
+//   - gpushare: 分配后才更新 PodMap
+//   - vgpu:     先调 addToPodMap 更新内存，再 Patch，防止 apiserver watch 延迟
 //
 // 分配流程：
 //  1. 检查 Pod 是否已经在该节点上分配过（通过 AssignedNodeAnnotations），避免重复分配。
@@ -423,6 +516,11 @@ func (gs *GPUDevices) Allocate(kubeClient kubernetes.Interface, pod *v1.Pod) err
 }
 
 // DeepCopy 返回 GPUDevices 的深拷贝，用于 dry-run 模拟调度。
+//
+// 与 gpushare.DeepCopy 对比：
+//   - gpushare: 拷贝 ID/Memory/PodMap，Pod 指针不做深拷贝
+//   - vgpu:     额外拷贝 UUID/Node/Type/Health/UsedXxx/MigTemplate/MigUsage
+//     且 PodMap 中的 GPUUsage 会做值拷贝（u := *usage）
 //
 // 注意：Sharing 字段是接口，拷贝后仍指向同一个工厂对象；
 // 这在只读场景下是安全的。PodMap、MigUsage、MigTemplate 都会做深拷贝。

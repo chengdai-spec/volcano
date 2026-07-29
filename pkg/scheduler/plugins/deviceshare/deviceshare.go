@@ -43,16 +43,16 @@ const (
 
 	// 以下这些 key 用于从调度器配置参数中读取开关/配置项
 
-	// GPUSharingPredicate 控制是否启用 GPU 共享模式（多个 Pod 共享同一块物理 GPU）
+	// GPUSharingPredicate 控制是否启用 GPU 共享模式(多个 Pod 共享同一块物理 GPU)
 	GPUSharingPredicate = "deviceshare.GPUSharingEnable"
 
 	// NodeLockEnable 控制是否启用节点锁机制，防止并发修改设备状态
 	NodeLockEnable = "deviceshare.NodeLockEnable"
 
-	// GPUNumberPredicate 控制是否启用 GPU 编号模式（指定具体 GPU 卡号）
+	// GPUNumberPredicate 控制是否启用 GPU 编号模式(指定具体 GPU 卡号)
 	GPUNumberPredicate = "deviceshare.GPUNumberEnable"
 
-	// VGPUEnable 控制是否启用 vGPU 虚拟化模式（将物理 GPU 切分为多个虚拟 GPU）
+	// VGPUEnable 控制是否启用 vGPU 虚拟化模式(将物理 GPU 切分为多个虚拟 GPU)
 	VGPUEnable = "deviceshare.VGPUEnable"
 
 	// AscendMindClusterVNPU 控制是否启用昇腾 MindCluster VNPU 模式
@@ -61,7 +61,7 @@ const (
 	// AscendHAMiVNPUEnable 控制是否启用昇腾 HAMi VNPU 模式
 	AscendHAMiVNPUEnable = "deviceshare.AscendHAMiVNPUEnable"
 
-	// SchedulePolicyArgument 指定调度策略，例如 binpack（紧凑）或 spread（分散）
+	// SchedulePolicyArgument 指定调度策略，例如 binpack(紧凑)或 spread(分散)
 	SchedulePolicyArgument = "deviceshare.SchedulePolicy"
 
 	// ScheduleWeight 指定设备打分的权重系数
@@ -84,7 +84,7 @@ type deviceSharePlugin struct {
 	// 插件配置参数，从 Volcano 调度器配置文件读取
 	pluginArguments framework.Arguments
 
-	// 调度策略，例如 binpack（优先填满节点）/ spread（优先分散到不同节点）等
+	// 调度策略，例如 binpack(优先填满节点)/ spread(优先分散到不同节点)等
 	schedulePolicy string
 
 	// 设备调度权重，影响最终节点打分
@@ -213,10 +213,24 @@ func registerDevices() {
 			api.RegisterDevice(vnpu.DeviceName)
 		}
 
-		// 如果启用了昇腾 HAMi VNPU，注册所有配置的 VNPU 类型
+		// 如果启用了昇腾 HAMi VNPU（异构算力融合方案），动态注册所有配置的 VNPU 设备类型
+		//
+		// 与前面几种设备（gpushare/vgpu/MindCluster VNPU）不同，
+		// HAMi VNPU 不是注册一个固定的设备名，而是从 ConfigMap 加载的配置列表中
+		// 读取所有芯片型号定义（如 Ascend910B3、Ascend310P 等），逐一注册。
+		//
+		// 数据来源链路：
+		//   ConfigMap(device-config.yaml) → InitDevicesConfig() 解析 → config.GetConfig().VNPUs
+		//
+		// 注册后，每种芯片型号的 CommonWord（如 "Ascend910B3"）会作为独立的设备类型
+		// 参与后续的 Predicate 过滤和 Score 打分流程。
 		if hami.AscendHAMiVNPUEnable {
+			// 遍历配置中定义的所有 VNPU 芯片型号
 			for _, vnpu := range config.GetConfig().VNPUs {
+				// 打印注册日志，方便排查哪些设备类型被成功注册
 				klog.V(3).Infof("register device %s", vnpu.CommonWord)
+				// 将该芯片型号注册到 Volcano 全局设备列表（api.RegisteredDevices）中
+				// RegisterDevice 内部已做去重，重复注册不会造成问题
 				api.RegisterDevice(vnpu.CommonWord)
 			}
 		}
@@ -341,7 +355,7 @@ func (dp *deviceSharePlugin) OnSessionOpen(ssn *framework.Session) {
 	// 如果配置中没有 GPUExclusiveRules，这个函数会直接返回，不做任何操作
 	dp.wrapGPUDevicesForExclusivity(ssn)
 
-	// 初始化设备（某些设备需要 session 作为输入）
+	// 初始化设备(某些设备需要 session 作为输入)
 	// 例如 VNPU 设备需要根据当前 session 中的任务分布建立索引
 	initializeDevicesWithSession(ssn)
 
@@ -352,6 +366,7 @@ func (dp *deviceSharePlugin) OnSessionOpen(ssn *framework.Session) {
 	// 这里逐个检查节点上的每一种设备，如果该 pod 请求了该设备，
 	// 就调用设备本身的 FilterNode 来做可行性检查。
 	ssn.AddPredicateFn(dp.Name(), func(task *api.TaskInfo, node *api.NodeInfo) error {
+
 		predicateStatus := make([]*api.Status, 0)
 
 		// 遍历当前节点上的所有已注册设备

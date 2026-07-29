@@ -16,6 +16,38 @@ limitations under the License.
 
 package vgpu
 
+// ──────────────────────────────────────────────────────────────────────────────
+// mig.go  —— NVIDIA MIG 硬件级切分共享模式的实现
+//
+// ╔═══════════════════════════════════════════════════════════════════════════╗
+// ║ MIG 模式说明：                                                            ║
+// ║                                                                          ║
+// ║  MIG (Multi-Instance GPU) 是 NVIDIA A100/H100 等显卡支持的硬件级      ║
+// ║  虚拟化技术，可以将一块物理 GPU 在硬件层面切分为多个互相隔离的实例。  ║
+// ║  每个实例拥有独立的显存、计算核心和缓存，彼此完全隔离。              ║
+// ║                                                                          ║
+// ║  与 gpushare 对比：                                                        ║
+// ║  ─────────────────────────────────────────────────────────────────────────╢
+// ║  gpushare 完全没有硬件切分能力，仅支持软件级的显存共享。              ║
+// ║  MIG 是 vgpu 独有的能力，通过几何模板(Geometry)管理硬件切分。          ║
+// ║                                                                          ║
+// ║  与 hami-core 对比：                                                        ║
+// ║  ─────────────────────────────────────────────────────────────────────────╢
+// ║  hami-core: 软件时间切片，多个 Pod 共享同一块物理 GPU，             ║
+// ║            由 HAMi CUDA Hook 在运行时隔离                                ║
+// ║  MIG:       硬件级切分，每个实例是独立的硬件单元，                    ║
+// ║            隔离由 GPU 硬件保证，无需额外软件层                         ║
+// ╚═══════════════════════════════════════════════════════════════════════════╝
+//
+// MIG 几何模板示例（A100 40GB）：
+//   group2: 3× 2g.20gb + 1× 1g.10gb   （3 个 20GB 实例 + 1 个 10GB 实例）
+//   group3: 1× 3g.40gb                （1 个 40GB 实例）
+//   group4: 2× 1g.20gb + 2× 1g.10gb   （2 个 20GB + 2 个 10GB）
+//
+// MIG 实例 ID 编码格式：UUID[group-position]
+//   例如：GPU-0fc3eda5-e98b[group2-3]  表示该 GPU 的 group2 中第 3 个位置
+// ──────────────────────────────────────────────────────────────────────────────
+
 import (
 	"fmt"
 	"sort"
@@ -35,6 +67,12 @@ import (
 //
 // 与 hami-core 不同，MIG 模式下 Volcano 调度器需要理解几何切分模板，
 // 并跟踪每个 MIG 实例的占用情况。
+//
+// 与 gpushare 对比：
+//   - gpushare 完全没有硬件切分能力，仅支持软件级显存共享
+//   - MIG 通过 MigTemplate（几何模板）+ MigUsage（占用状态）管理硬件实例
+//   - MIG 的 TryAddPod 需要在几何模板中查找满足显存需求的实例
+//   - MIG 的 AddPod/SubPod 需要解析/编码 MIG 实例 ID（UUID[group-position]）
 type MIGFactory struct{}
 
 func init() {
@@ -42,6 +80,11 @@ func init() {
 }
 
 // TryAddPod 在 predicate 阶段尝试为该 Pod 分配一个 MIG 实例。
+//
+// 与 hami-core.TryAddPod 对比：
+//   - hami-core: 直接累加 UsedNum/UsedMem/UsedCore，返回物理 GPU UUID
+//   - MIG:       调用 findMatch 在几何模板中查找满足显存需求的 MIG 实例，
+//     返回 MIG 实例 ID（格式：UUID[group-position]）
 //
 // 流程：
 //  1. 根据配置的 GPUMemoryFactor 对请求显存进行缩放。
@@ -145,6 +188,10 @@ func (f MIGFactory) SubPod(gd *GPUDevice, mem uint, core uint, podUID string, de
 
 // findMatch 根据请求的显存在 MIG 几何模板中查找一个可用实例。
 //
+// 这是 MIG 模式的核心算法，在 gpushare 和 hami-core 中均无对应逻辑。
+// gpushare 只需检查空闲显存，hami-core 只需累加 UsedXxx，
+// 而 MIG 需要理解几何切分模板，在多个 group 和 instance 中查找最优匹配。
+//
 // 参数：
 //   - uuid: 物理 GPU 的 UUID
 //   - requestMem: 请求显存（已考虑 memoryFactor 缩放）
@@ -196,10 +243,14 @@ func findMatch(
 
 // pickFromGroup 在一个 group 内查找满足显存需求且仍有空闲槽位的 MIG 实例。
 //
-// 查找策略：
-//   - 按实例显存从小到大排序。
-//   - 优先选择能满足 requestMemory 的最小实例，减少显存浪费。
-//   - 若该类型实例有空闲槽位（Count - len(UsedIndex) > 0），则分配。
+// 查找策略（最优匹配算法）：
+//   - 按实例显存从小到大排序
+//   - 优先选择能满足 requestMemory 的最小实例，减少显存浪费
+//   - 若该类型实例有空闲槽位（Count - len(UsedIndex) > 0），则分配
+//
+// 与 gpushare 对比：
+//   - gpushare 的 predicateGPUbyMemory 是简单的“空闲 >= 请求”判断
+//   - MIG 的 pickFromGroup 是最优匹配算法，尽量减少显存浪费
 //
 // 返回值：
 //   - bool: 是否找到

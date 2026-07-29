@@ -16,6 +16,34 @@ limitations under the License.
 
 package gpushare
 
+// ──────────────────────────────────────────────────────────────────────────────
+// share.go  —— gpushare 的 GPU 过滤、分配和辅助函数
+//
+// 本文件实现了 gpushare 方案的核心调度逻辑：
+//   1. predicateGPUbyMemory: 按显存过滤（找到空闲显存 >= 请求的 GPU）
+//   2. predicateGPUbyNumber: 按卡数过滤（找到完全空闲的整卡）
+//   3. AddGPUIndexPatch / RemoveGPUIndexPatch: 构造 JSON Patch
+//
+// ╔═══════════════════════════════════════════════════════════════════════════╗
+// ║ 与 vgpu 调度逻辑的核心区别：                                              ║
+// ║                                                                          ║
+// ║  gpushare（本文件）            vgpu（utils.go）                            ║
+// ║  ────────────────────         ───────────────────────                    ║
+// ║  无调度策略                 binpack / spread 策略                       ║
+// ║  无打分机制                 GPUScore 打分 + 缓存                         ║
+// ║  无 GPU 型号过滤              checkGPUtype 白/黑名单                     ║
+// ║  无 PodGroup Spread           deviceHasPodFromSameGroup                  ║
+// ║  无核心数约束                 UsedCore + Coresreq <= 100               ║
+// ║  无槽位数约束                 UsedNum < Number                          ║
+// ║  无共享模式检查               GPUModeAnnotation 检查                    ║
+// ║  无显存百分比              MemPercentagereq 支持                       ║
+// ║  无 Sharing 工厂              SharingFactory.TryAddPod                    ║
+// ║  无 dry-run 快照              getGPUDeviceSnapShot 模拟分配             ║
+// ║                                                                          ║
+// ║ 简言之：gpushare 是简单的“够不够”判断，vgpu 是复杂的“最优分配”过程 ║
+// ╚═══════════════════════════════════════════════════════════════════════════╝
+// ──────────────────────────────────────────────────────────────────────────────
+
 import (
 	"fmt"
 	"sort"
@@ -173,6 +201,11 @@ func checkNodeGPUNumberPredicate(pod *v1.Pod, gs *GPUDevices) (bool, error) {
 
 // predicateGPUbyMemory 筛选出空闲显存足以容纳该 Pod 的 GPU ID 列表，并按 ID 升序排列。
 //
+// 与 vgpu 对比：
+//   - gpushare: 简单遍历所有 GPU，找空闲显存 >= 请求的，按 ID 升序返回
+//   - vgpu:     先按策略排序（binpack=已用显存多优先 / spread=空闲槽位多优先），
+//     再检查槽位、核心、型号、PodGroup Spread 等多个约束
+//
 // 实际案例：
 // 节点 2 块 GPU，空闲显存分别为 {0: 1024, 1: 8192}，Pod 请求 2048MiB。
 // 则只有 ID=1 满足条件，返回 [1]。
@@ -192,6 +225,11 @@ func predicateGPUbyMemory(pod *v1.Pod, gs *GPUDevices) []int {
 }
 
 // predicateGPUbyNumber 返回能够满足 Pod 整卡数量请求的空闲 GPU ID 列表。
+//
+// 与 vgpu 对比：
+//   - gpushare: 整卡分配要求 GPU 完全空闲（PodMap 为空）
+//   - vgpu:     无“整卡”概念，通过 Coresreq=100 实现类似效果
+//     （要求 UsedNum=0 且 UsedCore+100 <= 100，即该 GPU 上无任何 Pod）
 //
 // 若空闲 GPU 数量不足，返回 nil；否则返回前 gpuRequest 个空闲 GPU ID（已按 ID 升序）。
 //
@@ -227,6 +265,11 @@ func escapeJSONPointer(p string) string {
 
 // AddGPUIndexPatch 构造一个 JSON Patch，用于向 Pod 写入 GPU 分配结果。
 //
+// 与 vgpu 对比：
+//   - gpushare: 使用 JSON Patch，写入 2 个注解（gpu-index + predicate-time）
+//   - vgpu:     使用 StrategicMergePatch，写入 6 个注解
+//     （vgpu-node + vgpu-time + vgpu-ids-new + devices-to-allocate + bind-phase + bind-time）
+//
 // Patch 包含两个 add 操作：
 //   1. 在 /metadata/annotations/volcano.sh~1predicate-time 写入当前时间戳（UnixNano）。
 //   2. 在 /metadata/annotations/volcano.sh~1gpu-index 写入分配的 GPU ID 列表字符串。
@@ -249,6 +292,11 @@ func RemoveGPUIndexPatch() string {
 }
 
 // getUsedGPUMemory 计算该 GPU 上已被占用的显存总量。
+//
+// 与 vgpu 对比：
+//   - gpushare: 每次计算时遍历 PodMap，累加每个 Pod 的 gpu-memory 请求
+//   - vgpu:     直接读取 GPUDevice.UsedMem，不需要遍历
+//     （因为 AddPod/SubPod 会实时维护 UsedMem）
 //
 // 遍历 PodMap，跳过状态为 Succeeded 或 Failed 的终态 Pod，
 // 将其 gpu-memory 请求累加，得到当前已被占用的显存。

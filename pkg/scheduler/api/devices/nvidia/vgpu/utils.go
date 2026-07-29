@@ -16,6 +16,30 @@ limitations under the License.
 
 package vgpu
 
+// ──────────────────────────────────────────────────────────────────────────────
+// utils.go  —— vgpu 的核心调度函数、编解码器和辅助工具
+//
+// 本文件包含 vgpu 方案的核心调度逻辑，与 gpushare/share.go 对应但复杂得多。
+//
+// ╔═══════════════════════════════════════════════════════════════════════════╗
+// ║ 核心函数对比：                                                            ║
+// ║                                                                          ║
+// ║  gpushare (share.go)              vgpu (utils.go)                         ║
+// ║  ─────────────────────         ─────────────────────────                 ║
+// ║  predicateGPUbyMemory        checkNodeGPUSharingPredicateAndScore      ║
+// ║    简单遍历找空闲显存           完整的模拟分配+打分+回滚                   ║
+// ║                                  检查 7 个约束条件                     ║
+// ║                                  支持 binpack/spread 策略              ║
+// ║  无                             sortedDeviceIndicesByPolicy             ║
+// ║  无                             GPUScore                                ║
+// ║  无                             getGPUDeviceSnapShot                    ║
+// ║  无                             checkGPUtype (白/黑名单)                ║
+// ║  无                             deviceHasPodFromSameGroup               ║
+// ║  getGPUMemoryOfPod             resourcereqs (三维资源请求)              ║
+// ║  AddGPUIndexPatch (JSON)       patchPodAnnotations (StrategicMerge)    ║
+// ╚═══════════════════════════════════════════════════════════════════════════╝
+// ──────────────────────────────────────────────────────────────────────────────
+
 import (
 	"context"
 	"encoding/json"
@@ -70,6 +94,10 @@ func extractGeometryFromType(t string) ([]config.Geometry, error) {
 }
 
 // decodeNodeDevices 从节点注解字符串中解码 GPU 设备信息。
+//
+// 与 gpushare 对比：
+//   - gpushare 不需要解码注解，直接从节点 Capacity 推算
+//   - vgpu 必须解析 HAMi 上报的注解字符串，提取每块 GPU 的完整物理信息
 //
 // 节点注解格式示例：
 // "UUID0,count,memory,type,health,mode:UUID1,count,memory,type,health,mode:..."
@@ -267,6 +295,10 @@ func getPodGroupKey(pod *v1.Pod) string {
 
 // deviceHasPodFromSameGroup 检查设备是否已有来自同一 PodGroup 的 Pod。
 //
+// 这是 vgpu 独有的能力，gpushare 不支持 PodGroup 级别的分散调度。
+// vgpu 通过此函数实现 PodGroup Spread 策略：
+//   同一作业的多个 Pod 分散到不同 GPU，避免单点故障。
+//
 // 参数：
 //   - gd: GPU 设备对象
 //   - currentKey: 当前 Pod 的 PodGroup key
@@ -345,6 +377,11 @@ func resourcereqs(pod *v1.Pod) []devices.ContainerDeviceRequest {
 }
 
 // checkGPUtype 检查 GPU 型号是否符合 Pod 注解中的过滤条件。
+//
+// 与 gpushare 对比：
+//   - gpushare 完全不知道 GPU 型号，无法进行型号过滤
+//   - vgpu 支持白名单（nvidia.com/use-gputype）和黑名单（nvidia.com/nouse-gputype）
+//     例如只允许 A100 或排除 T4
 //
 // 参数：
 //   - annos: Pod 注解
@@ -428,6 +465,12 @@ func checkType(annos map[string]string, d GPUDevice, n devices.ContainerDeviceRe
 }
 
 // getGPUDeviceSnapShot 创建 GPU 设备的快照（浅拷贝）。
+//
+// 与 gpushare 对比：
+//   - gpushare 没有 dry-run 概念，predicate 和 allocate 是同一过程
+//   - vgpu 通过快照实现“试探性分配”：
+//     FilterNode 时用快照模拟分配，成功则缓存打分，失败则丢弃快照
+//     Allocate 时才真正修改原始状态
 //
 // 参数：
 //   - snap: 原始 GPUDevices 对象
@@ -529,7 +572,17 @@ func getSharingMode(mode string) string {
 
 // checkNodeGPUSharingPredicateAndScore 检查 Pod 是否可以调度到节点并计算分数。
 //
-// 这是 vGPU 调度的核心函数，实现了完整的 GPU 共享调度逻辑。
+// 这是 vgpu 调度的核心函数，相当于 gpushare 中 predicateGPUbyMemory + predicateGPUbyNumber
+// 的超集，但复杂度高得多。
+//
+// 与 gpushare 对比：
+//   - gpushare 的 predicate 只做简单的“空闲 >= 请求”判断，无打分、无策略
+//   - vgpu 的 checkNodeGPUSharingPredicateAndScore 实现了：
+//     (1) 7 层约束检查（槽位/PodGroup/显存/核心/独占/零核/型号）
+//     (2) dry-run 模拟分配（replicate=true 时用快照，失败可回滚）
+//     (3) binpack/spread 调度策略排序
+//     (4) GPUScore 打分累加
+//     (5) SharingFactory.TryAddPod 最终确认
 //
 // 参数：
 //   - pod: 要调度的 Pod
@@ -729,6 +782,13 @@ func checkNodeGPUSharingPredicateAndScore(pod *v1.Pod, gssnap *GPUDevices, repli
 
 // sortedDeviceIndicesByPolicy 根据调度策略对 GPU 设备索引排序。
 //
+// 与 gpushare 对比：
+//   - gpushare 没有策略概念，始终按 ID 升序遍历，取第一个满足条件的 GPU
+//   - vgpu 支持三种排序策略：
+//     binpack: 已用显存多的优先（集中任务，留整卡空闲）
+//     spread:  已用槽位少的优先（分散任务，减少竞争）
+//     default: 按索引逆序遍历
+//
 // 参数：
 //   - gs: GPU 设备集合
 //   - schedulePolicy: 调度策略
@@ -784,6 +844,12 @@ func sortedDeviceIndicesByPolicy(gs *GPUDevices, schedulePolicy string) []int {
 }
 
 // GPUScore 计算单个 GPU 设备的分数。
+//
+// 与 gpushare 对比：
+//   - gpushare 无打分机制，ScoreNode 固定返回 0
+//   - vgpu 根据策略计算每个 GPU 的打分：
+//     binpack: 已用显存比例越高，分数越高（鼓励集中）
+//     spread:  完全空闲的 GPU 得分最高（鼓励分散）
 //
 // 参数：
 //   - schedulePolicy: 调度策略

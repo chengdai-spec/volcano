@@ -530,117 +530,151 @@ func (a *exclusiveGPUDevices) DeepCopy() interface{} {
 	return cp
 }
 
-// wrapGPUDevicesForExclusivity 在每个调度周期开始时，把节点上的 vgpu.GPUDevices 包装成 exclusiveGPUDevices。
+// wrapGPUDevicesForExclusivity 在每个调度周期（Session）开始时，为启用了 GPU 独占规则的节点
+// 把原始的 vgpu.GPUDevices 包装成 exclusiveGPUDevices。
 //
-// 整体流程（6 步）：
-//  1. 读取独占规则配置，无规则则跳过
-//  2. 遍历每个节点，找到 vgpu 设备（仅 hami-core 模式）
-//  3. 构建 podRules：当前节点上哪些 Pod 命中了哪些规则
-//  4. 从三个来源构建 ruleGPUs：每条规则已经占用了哪些 GPU
-//     - 来源 1（PodMap）：底层 GPU 设备已记录的 Pod 占用关系，最权威
-//     - 来源 2（Annotation）：Pod 上的 vGPU 分配注解，PodMap 找不到时的回退
-//     - 来源 3（持久化缓存）：上一轮 session 保留的数据，兜底方案
-//  5. 清理已不存在的 Pod 的持久化数据
-//  6. 用 exclusiveGPUDevices 替换原始 vgpu.GPUDevices
+// ╔═══════════════════════════════════════════════════════════════════════════╗
+// ║  一句话理解：                                                          ║
+// ║  "同一个团队的 Pod，不能共用 GPU"                                       ║
+// ║                                                                         ║
+// ║  实现手段：在调度时临时把"已被同团队占用"的 GPU 标记为已满，             ║
+// ║  让底层分配器看不到这些 GPU，从而自动避开。                             ║
+// ╚═══════════════════════════════════════════════════════════════════════════╝
 //
-// 下面以一个具体案例贯穿说明：
+// ┌───────────────────────────────────────────────────────────────────────────┐
+// │ 实战案例                                                                 │
+// │                                                                           │
+// │ 配置：                                                                     │
+// │   规则 0: {team: "ai"}      ← 带 team=ai 标签的 Pod 互相独占 GPU         │
+// │   规则 1: {team: "render"}  ← 带 team=render 标签的 Pod 互相独占 GPU     │
+// │                                                                           │
+// │ 节点 "gpu-node-01" 上有 4 块 GPU（编号 0~3），当前已运行 4 个 Pod：      │
+// │                                                                           │
+// │   ┌─────────────────────┬──────────────┬───────────────────────┐          │
+// │   │ Pod                 │ 标签         │ 占用的 GPU            │          │
+// │   ├─────────────────────┼──────────────┼───────────────────────┤          │
+// │   │ pod-alice (team=ai) │ team=ai      │ GPU 0（PodMap 已记录）│          │
+// │   │ pod-bob   (team=ai) │ team=ai      │ GPU 1（刚调度，PodMap │          │
+// │   │                     │              │       还没更新）      │          │
+// │   │ pod-carol (render)  │ team=render  │ GPU 2（PodMap 已记录）│          │
+
+// │   └─────────────────────┴──────────────┴───────────────────────┘          │
+// │                                                                           │
+// │ 调度器重启后，持久化缓存中还保留了上次的数据：                                    │
+// │   persistedGPUs["gpu-node-01"]["default/pod-bob"]  = {GPU 1}             │
+// │   persistedGPUs["gpu-node-01"]["default/pod-old"]  = {GPU 3} ← Pod 已删除│
+// │                                                                           │
+// │ ── 本函数执行后期望得到的结果 ──                                         │
+// │                                                                           │
+// │   ruleGPUs = {                                                           │
+// │     规则0(ai):     {GPU 0, GPU 1},   ← ai 团队已占用 0 和 1              │
+// │     规则1(render): {GPU 2},           ← render 团队已占用 2              │
+// │   }                                                                      │
+// │                                                                           │
+// │ 效果：                                                                    │
+// │   新来 pod-eve (team=ai) 调度时：                                         │
+// │     → 查出规则 0 已占 GPU 0,1 → 把 GPU 0,1 临时标记为"已满"             │
+// │     → 底层分配器只能从 GPU 2,3 中选 → Eve 分到 GPU 2 或 3                │
+// │     → 这样就保证了 ai 团队的每个 Pod 都独占自己的 GPU                    │
+// └───────────────────────────────────────────────────────────────────────────┘
 //
-//	假设独占规则配置为：
-//	  规则 0: {team: "ai"}
-//	  规则 1: {team: "render"}
-//
-//	节点 A 有 4 块 GPU（index 0-3），当前已有：
-//	  pod-1 (team=ai)    → 已分配 GPU 0，PodMap 中有记录
-//	  pod-2 (team=ai)    → 已分配 GPU 1，PodMap 中尚未更新（刚调度完）
-//	  pod-3 (team=render) → 已分配 GPU 2，PodMap 中有记录
-//	  pod-4 (无 label)    → 已分配 GPU 0,1（共享），不命中任何规则
-//
-//	持久化缓存中有：
-//	  persistedGPUs["nodeA"]["default/pod-2"] = {1}
-//	  persistedGPUs["nodeA"]["default/pod-old"] = {3}  ← pod-old 已不在节点上
-//
-//	期望最终结果：
-//	  ruleGPUs = {0: {0, 1}, 1: {2}}
-//	  即：规则 0（team=ai）占了 GPU 0 和 1；规则 1（team=render）占了 GPU 2
-//	  后续新的 team=ai 的 Pod 来调度时，GPU 0/1 会被屏蔽，只能分到 GPU 2/3
+// 整体执行流程（6 步）：
+//  1. 读取独占规则配置 → 没有配置就跳过
+//  2. 遍历每个节点 → 取出 vgpu 设备（仅支持 hami-core 模式）
+//  3. 扫描节点上所有 Pod → 建立「Pod ↔ 规则」的对应关系 (podRules)
+//  4. 从 3 个数据源收集「规则 ↔ 已占用 GPU」(ruleGPUs)
+//     来源 A：底层 PodMap（最可靠，实时数据）
+//     来源 B：Pod annotation（PodMap 未更新时的回退）
+//     来源 C：持久化缓存（调度器重启后的兜底）
+//  5. 清理持久化缓存中已失效的 Pod 数据
+//  6. 用 exclusiveGPUDevices 包装器替换原始设备对象
 func (dp *deviceSharePlugin) wrapGPUDevicesForExclusivity(ssn *framework.Session) {
 	dp.lock.Lock()
 	defer dp.lock.Unlock()
 
-	// ---------------------------------------------------------------
-	// 第 1 步：读取独占规则配置
-	// ---------------------------------------------------------------
+	// ══════════════════════════════════════════════════════════════════
+	// 第 1 步：从调度器配置中读取独占规则
+	// ══════════════════════════════════════════════════════════════════
+	//
 	// 配置示例（YAML）：
 	//   tiers:
 	//   - plugins:
 	//     - name: deviceshare
 	//       arguments:
 	//         deviceshare.GPUExclusiveRules:
-	//           - team: "ai"        ← 规则 0：同时带 team=ai 的 Pod 构成独占组
-	//             gpu-excl: "true"
-	//           - team: "render"    ← 规则 1：同时带 team=render 的 Pod 构成独占组
+	//           - team: "ai"           ← 规则 0：带 team=ai 的 Pod 构成独占组
+	//             gpu-excl: "true"     ← Pod 必须同时匹配这两个标签才算命中规则 0
+	//           - team: "render"       ← 规则 1：带 team=render 的 Pod 构成独占组
 	//
-	// 每条规则是一组 label 键值对，Pod 必须"同时满足所有 label"才算命中。
+	// 每条规则是一组 label 键值对，Pod 必须同时满足所有键值对才算命中该规则。
 	cfg := loadGPUExclusiveConfig(dp.pluginArguments)
 	klog.V(4).Infof("gpuexclusive config: rules=%v", cfg.rules)
 
-	// 没有配置任何规则 → 不需要独占逻辑，直接返回，不做任何包装
+	// 没有配置任何规则 → 不需要独占逻辑，直接返回
 	if len(cfg.rules) == 0 {
 		klog.V(2).Info("gpuexclusive: no rules configured, skipping GPU exclusivity wrapping")
 		return
 	}
 
-	// ---------------------------------------------------------------
-	// 第 2 步：遍历所有节点，找到 vgpu 设备并包装
-	// ---------------------------------------------------------------
+	// ══════════════════════════════════════════════════════════════════
+	// 第 2 步：遍历所有节点，取出该节点上的 vgpu 设备对象
+	// ══════════════════════════════════════════════════════════════════
 	for _, node := range ssn.Nodes {
 		if node.Others == nil {
 			continue
 		}
 
 		// 从节点的 Others 字典中取出 vgpu 设备对象
+		// Others 是 Volcano 为每种设备类型维护的 map，key 是设备名称
 		devObj, ok := node.Others[vgpu.DeviceName]
 		if !ok || devObj == nil {
 			continue // 该节点没有 vgpu 设备，跳过
 		}
 
 		// 类型断言为底层 *vgpu.GPUDevices
+		// 只有成功断言才能拿到 GPU 列表、PodMap 等信息
 		inner, ok := devObj.(*vgpu.GPUDevices)
 		if !ok || inner == nil {
 			continue
 		}
 
-		// 仅支持 hami-core 模式的 GPU 独占。
-		// hami-core 是软件层的 vGPU 切分，可以通过修改 Number 来屏蔽 GPU。
-		// 如果是硬件级 MIG 等模式，Number 的语义不同，不能这样做。
+		// 仅支持 hami-core 模式（软件层 vGPU 切分）。
+		// 因为独占的实现手段是“修改 GPU 的 Number 字段让分配器认为已满”，
+		// 只有 hami-core 模式下 Number 才有这个语义。
+		// 其他模式如 MIG（硬件级切分）不能用这种方式。
 		if inner.Mode != "" && inner.Mode != "hami-core" {
 			klog.V(4).Infof("gpuexclusive: skipping node %s with GPU mode %q (only hami-core supported)", node.Name, inner.Mode)
 			continue
 		}
 
-		// =========================================================
-		// 第 3 步：构建当前节点上的 Pod-规则关系 (podRules)
-		// =========================================================
+		// ══════════════════════════════════════════════════════════════
+		// 第 3 步：扫描节点上所有 Pod，建立三个辅助 map
+		// ══════════════════════════════════════════════════════════════
 		//
-		// podRules: 记录哪些 Pod 命中了哪些规则
-		//   key: "namespace/name"（如 "default/pod-1"）
-		//   value: 规则索引集合（如 {0: {}} 表示命中规则 0）
+		// 这一步产出三个 map，供后续步骤使用：
 		//
-		// 案例执行结果：
-		//   podRules = {
-		//     "default/pod-1": {0},   // team=ai → 命中规则 0
-		//     "default/pod-2": {0},   // team=ai → 命中规则 0
-		//     "default/pod-3": {1},   // team=render → 命中规则 1
-		//   }
-		//   pod-4 无 label，不命中任何规则，不进入 podRules
+		// ① podRules：哪个 Pod 命中了哪些规则
+		//    key:   "namespace/name"（Pod 唯一标识）
+		//    value: 规则索引集合（如 {0} 表示命中规则 0）
+		//    案例结果：
+		//      podRules = {
+		//        "default/pod-alice": {0},   ← team=ai → 命中规则 0
+		//        "default/pod-bob":   {0},   ← team=ai → 命中规则 0
+		//        "default/pod-carol": {1},   ← team=render → 命中规则 1
+		//      }
+		//      pod-dave 无标签，不命中任何规则，不进入 podRules
+		//
+		// ② podUIDs：namespace/name → Pod UID 的映射
+		//    用途：后续需要通过 UID 去 PodMap 或 annotation 中查找
+		//
+		// ③ uidToKey：Pod UID → namespace/name 的反向映射
+		//    用途：底层 GPU 的 PodMap 以 UID 为 key，
+		//    需要反查到 namespace/name 才能和 podRules 对应
 		podRules := make(map[string]map[int]struct{})
-		// podUIDs: namespace/name → Pod UID 的映射
 		podUIDs := make(map[string]string)
-		// uidToKey: Pod UID → namespace/name 的反向映射
-		// 因为底层 GPU 的 PodMap 以 UID 为 key，需要反查到 namespace/name
 		uidToKey := make(map[string]string)
 
-		// 遍历节点上所有已调度的 Task/Pod
+		// 遍历节点上所有已调度的 Pod
 		for _, task := range node.Tasks {
 			if task.Pod == nil {
 				continue
@@ -650,10 +684,10 @@ func (dp *deviceSharePlugin) wrapGPUDevicesForExclusivity(ssn *framework.Session
 			podUIDs[pk] = uid
 			uidToKey[uid] = pk
 
-			// 检查这个 Pod 命中了哪些独占规则
+			// 检查这个 Pod 的标签命中了哪些独占规则
 			matched := matchingRules(task.Pod, cfg.rules)
 			if len(matched) == 0 {
-				continue // 不命中任何规则，跳过（如 pod-4）
+				continue // 不命中任何规则（如 pod-dave），跳过
 			}
 
 			// 把命中的规则索引存入 ruleSet
@@ -664,8 +698,8 @@ func (dp *deviceSharePlugin) wrapGPUDevicesForExclusivity(ssn *framework.Session
 			podRules[pk] = ruleSet
 		}
 
-		// 建立 GPU UUID → GPU index 的反向映射
-		// 底层 GPU 设备用 UUID 标识，但 ruleGPUs 用 index 标识，需要转换
+		// 额外建立 GPU UUID → GPU 编号 的反向映射
+		// 原因：底层 GPU 设备用 UUID 标识，但 ruleGPUs 用编号（0,1,2,3）标识
 		// 案例中：
 		//   uuidToIdx = {"gpu-uuid-0": 0, "gpu-uuid-1": 1, "gpu-uuid-2": 2, "gpu-uuid-3": 3}
 		uuidToIdx := make(map[string]int, len(inner.Device))
@@ -675,38 +709,51 @@ func (dp *deviceSharePlugin) wrapGPUDevicesForExclusivity(ssn *framework.Session
 			}
 		}
 
-		// =========================================================
-		// 第 4 步：构建 ruleGPUs —— 每条规则已经占用了哪些 GPU
-		// =========================================================
+		// ══════════════════════════════════════════════════════════════
+		// 第 4 步：从 3 个数据源收集「规则 ↔ 已占用 GPU」(ruleGPUs)
+		// ══════════════════════════════════════════════════════════════
 		//
-		// ruleGPUs 是独占逻辑的核心数据结构：
-		//   key: 规则索引（如 0 代表规则 {team: "ai"}）
-		//   value: 该规则组已占用的 GPU index 集合
+		// ruleGPUs 是本函数的核心产出：
+		//   key:   规则索引（如 0 代表 {team: "ai"}）
+		//   value: 该规则已占用的 GPU 编号集合
 		//
-		// 需要从三个来源逐步构建，因为不同来源的可靠性/时效性不同。
+		// 为什么要 3 个数据源？
+		//   因为 GPU 占用信息的“可靠性”和“时效性”不同：
+		//
+		//   来源 A（PodMap）：实时数据，最可靠，但可能有延迟
+		//     → Pod 刚调度完时，PodMap 可能还没更新
+		//
+		//   来源 B（Annotation）：Pod 分配 GPU 后写入的注解
+		//     → PodMap 没更新时，可以从这里补上
+		//
+		//   来源 C（持久化缓存）：调度器重启前保存的快照
+		//     → 前两个都找不到时的兆底方案
+		//
+		// 三个来源按优先级从高到低依次处理，后面的只补充前面遗漏的。
 		ruleGPUs := make(map[int]map[int]struct{})
 
-		// ---------------------------------------------------------
-		// 来源 1（最权威）：从底层 GPU 设备的 PodMap 读取
-		// ---------------------------------------------------------
+		// ─────────────────────────────────────────────────────────────
+		// 来源 A（最可靠）：从底层 GPU 设备的 PodMap 读取
+		// ─────────────────────────────────────────────────────────────
 		//
-		// 每块 GPU 设备都有一个 PodMap，记录了哪些 Pod（以 UID 为 key）正在使用它。
-		// 遍历所有 GPU 的 PodMap，如果某个 Pod 命中了独占规则，
+		// 每块 GPU 设备都有一个 PodMap，记录哪些 Pod（以 UID 为 key）正在使用它。
+		// 遍历所有 GPU 的 PodMap：如果某个 Pod 命中了独占规则，
 		// 就把这块 GPU 标记为该规则的"已占用"。
 		//
 		// 案例执行过程：
-		//   GPU 0 的 PodMap: {uid-1, uid-4}
-		//     → uid-1 → "default/pod-1" → 命中规则 0 → ruleGPUs[0] += {GPU 0}
-		//     → uid-4 → "default/pod-4" → 不在 podRules 中 → 跳过
-		//   GPU 1 的 PodMap: {uid-4}
-		//     → uid-4 → 不在 podRules 中 → 跳过
-		//     （注意：pod-2 虽然在 GPU 1 上，但 PodMap 还没更新！）
-		//   GPU 2 的 PodMap: {uid-3}
-		//     → uid-3 → "default/pod-3" → 命中规则 1 → ruleGPUs[1] += {GPU 2}
+		//   GPU 0 的 PodMap: {uid-alice, uid-dave}
+		//     → uid-alice → pod-alice → 命中规则 0 → ruleGPUs[0] += GPU 0 ✔
+		//     → uid-dave  → pod-dave  → 无规则      → 跳过
+		//   GPU 1 的 PodMap: {uid-dave}
+		//     → uid-dave → pod-dave → 无规则 → 跳过
+		//     ⚠️ pod-bob 在 GPU 1 上，但 PodMap 还没更新！
+		//   GPU 2 的 PodMap: {uid-carol}
+		//     → uid-carol → pod-carol → 命中规则 1 → ruleGPUs[1] += GPU 2 ✔
 		//   GPU 3 的 PodMap: {} (空)
 		//
-		// 来源 1 结束后：ruleGPUs = {0: {0}, 1: {2}}
-		// 缺失了 pod-2 在 GPU 1 上的信息（PodMap 尚未更新）
+		// 来源 A 结束后：
+		//   ruleGPUs = { 0: {0}, 1: {2} }
+		//   ⚠️ 缺少 pod-bob 在 GPU 1 上的信息，需要后续来源补充
 		for gpuIdx, dev := range inner.Device {
 			if dev == nil {
 				continue
@@ -726,27 +773,28 @@ func (dp *deviceSharePlugin) wrapGPUDevicesForExclusivity(ssn *framework.Session
 			}
 		}
 
-		// ---------------------------------------------------------
-		// 来源 2（回退方案）：从 Pod annotation 读取
-		// ---------------------------------------------------------
+		// ─────────────────────────────────────────────────────────────
+		// 来源 B（回退方案）：从 Pod annotation 读取
+		// ─────────────────────────────────────────────────────────────
 		//
-		// 当 PodMap 还没有更新时（例如 Pod 刚被调度、还在 Allocate 阶段），
-		// 可以退而求其次，从 Pod 的 annotation 中读取 vGPU 分配信息。
+		// 什么时候需要这个来源？
+		//   Pod 刚被调度、还在 Allocate 阶段时，PodMap 可能还没更新。
+		//   但 GPU 分配器已经把结果写入了 Pod 的 annotation 中
+		//   （key = vgpu.AssignedIDsAnnotations）。
 		//
-		// vGPU 设备在分配 GPU 后，会把分配的 GPU UUID 写入 Pod 的 annotation
-		// （key = vgpu.AssignedIDsAnnotations）。
-		//
-		// 只对"PodMap 中找不到"的 Pod 执行此步骤，避免重复处理。
+		// 处理策略：
+		//   只对"PodMap 中找不到"的 Pod 查 annotation，避免重复。
 		//
 		// 案例执行过程：
-		//   pod-1 (uid-1): GPU 0 的 PodMap 中有 uid-1 → alreadyTracked → 跳过
-		//   pod-2 (uid-2): 所有 GPU 的 PodMap 都没有 uid-2 → 需要查 annotation
-		//     → 读取 pod-2 的 annotation，解码得到 GPU UUID "gpu-uuid-1"
+		//   pod-alice: GPU 0 的 PodMap 中有 uid-alice → 已跟踪 → 跳过
+		//   pod-bob: 所有 GPU 的 PodMap 都没有 uid-bob → 查 annotation
+		//     → 读 pod-bob 的 annotation，解码得到 GPU UUID "gpu-uuid-1"
 		//     → uuidToIdx["gpu-uuid-1"] = 1
-		//     → ruleGPUs[0] += {GPU 1}
-		//   pod-3 (uid-3): GPU 2 的 PodMap 中有 uid-3 → alreadyTracked → 跳过
+		//     → ruleGPUs[0] += GPU 1 ✔
+		//   pod-carol: GPU 2 的 PodMap 中有 uid-carol → 已跟踪 → 跳过
 		//
-		// 来源 2 结束后：ruleGPUs = {0: {0, 1}, 1: {2}}  ← 补上了 pod-2 的信息
+		// 来源 B 结束后：
+		//   ruleGPUs = { 0: {0, 1}, 1: {2} }   ← 补上了 pod-bob 的信息！
 		for pk, ruleSet := range podRules {
 			podUID := podUIDs[pk]
 
@@ -796,30 +844,33 @@ func (dp *deviceSharePlugin) wrapGPUDevicesForExclusivity(ssn *framework.Session
 			}
 		}
 
-		// ---------------------------------------------------------
-		// 来源 3（兜底方案）：从跨 session 持久化数据恢复
-		// ---------------------------------------------------------
+		// ─────────────────────────────────────────────────────────────
+		// 来源 C（兆底方案）：从跨 Session 持久化缓存恢复
+		// ─────────────────────────────────────────────────────────────
 		//
-		// 当调度器重启或 PodMap 和 annotation 都丢失时，
-		// 可以从 plugin 级别的持久化缓存中恢复 GPU 归属关系。
+		// 什么时候需要这个来源？
+		//   调度器重启后，PodMap 和 annotation 可能都丢失了，
+		//   但插件级别的持久化缓存（persistedGPUs）跨 session 保留。
 		//
-		// persistedGPUs[nodeName][podKey] = GPU index 集合
-		// persistedPodRules[nodeName][podKey] = 规则索引集合
+		// 数据结构：
+		//   persistedGPUs[nodeName][podKey]     = GPU 编号集合
+		//   persistedPodRules[nodeName][podKey] = 规则索引集合
 		//
-		// 恢复条件：
+		// 恢复条件（两个必须同时满足）：
 		//   a. Pod 仍然存在于当前节点（在 podRules 中）
-		//   b. PodMap 中找不到（否则来源 1 已经处理过了）
+		//   b. PodMap 中找不到该 Pod（否则来源 A 已处理）
 		//
 		// 案例执行过程：
-		//   persistedGPUs["nodeA"]["default/pod-2"] = {1}
-		//     → pod-2 在 podRules 中 ✓
-		//     → PodMap 中找不到 uid-2 → 需要恢复
-		//     → ruleGPUs[0] += {GPU 1}(重复添加也无所谓，set 自动去重)
+		//   persistedGPUs["gpu-node-01"]["default/pod-bob"] = {1}
+		//     → pod-bob 在 podRules 中 ✔
+		//     → PodMap 中找不到 uid-bob → 需要恢复
+		//     → ruleGPUs[0] += GPU 1（重复添加也无妨，set 自动去重）
 		//
-		//   persistedGPUs["nodeA"]["default/pod-old"] = {3}
-		//     → pod-old 不在 podRules 中 → 跳过(Pod 已不存在)
+		//   persistedGPUs["gpu-node-01"]["default/pod-old"] = {3}
+		//     → pod-old 不在 podRules 中 → Pod 已不存在 → 跳过
 		//
-		// 来源 3 结束后：ruleGPUs = {0: {0, 1}, 1: {2}}(无变化)
+		// 来源 C 结束后：
+		//   ruleGPUs = { 0: {0, 1}, 1: {2} }  （无变化，本例中来源 B 已处理）
 		if persisted, ok := dp.persistedGPUs[node.Name]; ok {
 
 			persistedRules := dp.persistedPodRules[node.Name]
@@ -864,15 +915,17 @@ func (dp *deviceSharePlugin) wrapGPUDevicesForExclusivity(ssn *framework.Session
 			}
 		}
 
-		// =========================================================
-		// 第 5 步：清理已不存在的 Pod 的持久化数据
-		// =========================================================
+		// ══════════════════════════════════════════════════════════════
+		// 第 5 步：清理持久化缓存中已失效的 Pod 数据
+		// ══════════════════════════════════════════════════════════════
 		//
-		// 持久化缓存中可能有过期的条目（Pod 已被删除/迁移），
-		// 需要清理掉，防止内存泄漏和错误占用。
+		// 持久化缓存中可能有过期的条目（Pod 已被删除或迁移到其他节点），
+		// 如果不清理，会导致：
+		//   - 内存泄漏（积累越来越多无效数据）
+		//   - 错误占用（已删除 Pod 的 GPU 仍然被标记为“被占用”）
 		//
 		// 案例执行过程：
-		//   activePods = {"default/pod-1", "default/pod-2", "default/pod-3", "default/pod-4"}
+		//   activePods = {pod-alice, pod-bob, pod-carol, pod-dave}
 		//   persisted 中有 "default/pod-old" → 不在 activePods 中 → 删除
 		activePods := make(map[string]bool, len(node.Tasks))
 		for _, task := range node.Tasks {
@@ -891,26 +944,33 @@ func (dp *deviceSharePlugin) wrapGPUDevicesForExclusivity(ssn *framework.Session
 			}
 		}
 
-		// =========================================================
-		// 第 6 步：用 exclusiveGPUDevices 替换原始 vgpu.GPUDevices
-		// =========================================================
+		// ══════════════════════════════════════════════════════════════
+		// 第 6 步：用 exclusiveGPUDevices 包装器替换原始设备对象
+		// ══════════════════════════════════════════════════════════════
 		//
-		// 替换后，整个调度周期内对该节点 vgpu 设备的所有操作
-		// （FilterNode / Allocate / Release / DeepCopy 等）
-		// 都会经过 exclusiveGPUDevices 的包装逻辑。
+		// 替换后，整个调度周期内对该节点的 vgpu 设备的所有操作：
+		//   - FilterNode(判断 Pod 能否调度到该节点)
+		//   - Allocate(分配 GPU 资源)
+		//   - Release(释放 GPU 资源)
+		//   - DeepCopy(调度模拟时的深拷贝)
+		// 都会经过 exclusiveGPUDevices 的包装逻辑,从而实现 GPU 独占
 		//
 		// 案例最终状态：
-		//   wrapper.ruleGPUs = {0: {0, 1}, 1: {2}}
+		//   wrapper.ruleGPUs = { 0: {0, 1}, 1: {2} }
+		//
 		//   含义：
 		//     - 规则 0（team=ai）已占用 GPU 0 和 1
 		//     - 规则 1（team=render）已占用 GPU 2
 		//     - GPU 3 空闲
 		//
-		// 后续效果：当新的 pod-5 (team=ai) 来调度时：
-		//   Filter 阶段 → reservedGPUsForPod 返回 {0, 1}
-		//   → capGPUs({0, 1}) → GPU 0,1 的 Number 被设为 UsedNum → 底层认为已满
-		//   → 底层 allocator 只看到 GPU 2,3 可用
-		//   → pod-5 被分配到 GPU 2 或 3 → 实现了同规则 Pod 之间的 GPU 隔离！
+		// 后续调度效果：
+		//   新来 pod-eve (team=ai) 调度时：
+		//     ① reservedGPUsForPod(pod-eve) 返回 {0, 1}
+		//     ② capGPUs({0,1}) 把 GPU 0,1 的 Number 设为 UsedNum
+		//     ③ 底层分配器认为 GPU 0,1 已满，只能看到 GPU 2,3
+		//     ④ pod-eve 被分配到 GPU 2 或 3
+		//     ⑤ restoreGPUs 恢复 GPU 0,1 的原始 Number
+		//     → 实现了 ai 团队内每个 Pod 独占 GPU 的目标！
 		wrapper := &exclusiveGPUDevices{
 			inner:    inner,
 			cfg:      cfg,
