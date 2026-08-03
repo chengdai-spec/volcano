@@ -48,7 +48,7 @@ type volumeCapacityScorer func(classResourceMap) int64
 func buildScorerFunction(scoringFunctionShape helper.FunctionShape) volumeCapacityScorer {
 	// 第一步：根据采样点构建分段线性函数。
 	// helper.BuildBrokenLinearFunction 会将相邻采样点用直线连接，
-	// 输入利用率（0~100），输出对应分数。
+	// 输入利用率(0~100)，输出对应分数。
 	rawScoringFunction := helper.BuildBrokenLinearFunction(scoringFunctionShape)
 
 	// f 是单个 StorageClass 的评分函数。

@@ -213,17 +213,17 @@ func registerDevices() {
 			api.RegisterDevice(vnpu.DeviceName)
 		}
 
-		// 如果启用了昇腾 HAMi VNPU（异构算力融合方案），动态注册所有配置的 VNPU 设备类型
+		// 如果启用了昇腾 HAMi VNPU(异构算力融合方案)，动态注册所有配置的 VNPU 设备类型
 		//
-		// 与前面几种设备（gpushare/vgpu/MindCluster VNPU）不同，
+		// 与前面几种设备(gpushare/vgpu/MindCluster VNPU)不同，
 		// HAMi VNPU 不是注册一个固定的设备名，而是从 ConfigMap 加载的配置列表中
-		// 读取所有芯片型号定义（如 Ascend910B3、Ascend310P 等），逐一注册。
+		// 读取所有芯片型号定义(如 Ascend910B3、Ascend310P 等)，逐一注册
 		//
 		// 数据来源链路：
 		//   ConfigMap(device-config.yaml) → InitDevicesConfig() 解析 → config.GetConfig().VNPUs
 		//
-		// 注册后，每种芯片型号的 CommonWord（如 "Ascend910B3"）会作为独立的设备类型
-		// 参与后续的 Predicate 过滤和 Score 打分流程。
+		// 注册后，每种芯片型号的 CommonWord(如 "Ascend910B3")会作为独立的设备类型
+		// 参与后续的 Predicate 过滤和 Score 打分流程
 		if hami.AscendHAMiVNPUEnable {
 			// 遍历配置中定义的所有 VNPU 芯片型号
 			for _, vnpu := range config.GetConfig().VNPUs {
@@ -240,7 +240,7 @@ func registerDevices() {
 // createStatus 创建一个 api.Status，方便返回错误状态
 //
 // 这是一个辅助函数，用于统一创建状态对象。
-// code 表示状态码（如 Success、Error 等），reason 是错误描述。
+// code 表示状态码(如 Success、Error 等)，reason 是错误描述。
 func createStatus(code int, reason string) *api.Status {
 	status := api.Status{
 		Code:   code,

@@ -417,11 +417,11 @@ func (gs *GPUDevices) Release(kubeClient kubernetes.Interface, pod *v1.Pod) erro
 	return nil
 }
 
-// FilterNode 在 predicate 阶段检查 Pod 是否能放入该节点的 vGPU 资源。
+// FilterNode 在 predicate 阶段检查 Pod 是否能放入该节点的 vGPU 资源
 //
 // 与 gpushare.FilterNode 对比：
 //   - gpushare: 分别检查显存和卡数，无打分，成功时直接返回
-//   - vgpu:     调用 checkNodeGPUSharingPredicateAndScore 进行完整的模拟分配
+//   - vgpu: 调用 checkNodeGPUSharingPredicateAndScore 进行完整的模拟分配
 //     同时检查槽位、核心、型号、PodGroup Spread 等约束，并计算打分缓存到 gs.Score
 //   - gpushare 的过滤是简单的“够不够”判断
 //   - vgpu 的过滤是复杂的“最优分配 + 打分”过程

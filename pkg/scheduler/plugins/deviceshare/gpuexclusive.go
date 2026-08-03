@@ -530,52 +530,52 @@ func (a *exclusiveGPUDevices) DeepCopy() interface{} {
 	return cp
 }
 
-// wrapGPUDevicesForExclusivity 在每个调度周期（Session）开始时，为启用了 GPU 独占规则的节点
+// wrapGPUDevicesForExclusivity 在每个调度周期(Session)开始时，为启用了 GPU 独占规则的节点
 // 把原始的 vgpu.GPUDevices 包装成 exclusiveGPUDevices。
 //
 // ╔═══════════════════════════════════════════════════════════════════════════╗
-// ║  一句话理解：                                                          ║
-// ║  "同一个团队的 Pod，不能共用 GPU"                                       ║
-// ║                                                                         ║
-// ║  实现手段：在调度时临时把"已被同团队占用"的 GPU 标记为已满，             ║
-// ║  让底层分配器看不到这些 GPU，从而自动避开。                             ║
+// ║  一句话理解：                                                               ║
+// ║  "同一个团队的 Pod，不能共用 GPU"                                             ║
+// ║                                                                           ║
+// ║  实现手段：在调度时临时把"已被同团队占用"的 GPU 标记为已满，                        ║
+// ║  让底层分配器看不到这些 GPU，从而自动避开。                                      ║
 // ╚═══════════════════════════════════════════════════════════════════════════╝
 //
 // ┌───────────────────────────────────────────────────────────────────────────┐
-// │ 实战案例                                                                 │
+// │ 实战案例                                                                    │
 // │                                                                           │
 // │ 配置：                                                                     │
-// │   规则 0: {team: "ai"}      ← 带 team=ai 标签的 Pod 互相独占 GPU         │
-// │   规则 1: {team: "render"}  ← 带 team=render 标签的 Pod 互相独占 GPU     │
+// │   规则 0: {team: "ai"}      ← 带 team=ai 标签的 Pod 互相独占 GPU              │
+// │   规则 1: {team: "render"}  ← 带 team=render 标签的 Pod 互相独占 GPU          │
 // │                                                                           │
-// │ 节点 "gpu-node-01" 上有 4 块 GPU（编号 0~3），当前已运行 4 个 Pod：      │
+// │ 节点 "gpu-node-01" 上有 4 块 GPU(编号 0~3)，当前已运行 4 个 Pod：               │
 // │                                                                           │
 // │   ┌─────────────────────┬──────────────┬───────────────────────┐          │
-// │   │ Pod                 │ 标签         │ 占用的 GPU            │          │
+// │   │ Pod                 │ 标签         │ 占用的 GPU              │          │
 // │   ├─────────────────────┼──────────────┼───────────────────────┤          │
-// │   │ pod-alice (team=ai) │ team=ai      │ GPU 0（PodMap 已记录）│          │
-// │   │ pod-bob   (team=ai) │ team=ai      │ GPU 1（刚调度，PodMap │          │
-// │   │                     │              │       还没更新）      │          │
-// │   │ pod-carol (render)  │ team=render  │ GPU 2（PodMap 已记录）│          │
+// │   │ pod-alice (team=ai) │ team=ai      │ GPU 0（PodMap 已记录）  │          │
+// │   │ pod-bob   (team=ai) │ team=ai      │ GPU 1（刚调度，PodMap   │          │
+// │   │                     │              │       还没更新）        │          │
+// │   │ pod-carol (render)  │ team=render  │ GPU 2（PodMap 已记录）  │          │
 
 // │   └─────────────────────┴──────────────┴───────────────────────┘          │
 // │                                                                           │
-// │ 调度器重启后，持久化缓存中还保留了上次的数据：                                    │
-// │   persistedGPUs["gpu-node-01"]["default/pod-bob"]  = {GPU 1}             │
-// │   persistedGPUs["gpu-node-01"]["default/pod-old"]  = {GPU 3} ← Pod 已删除│
+// │ 调度器重启后，持久化缓存中还保留了上次的数据：                                     │
+// │   persistedGPUs["gpu-node-01"]["default/pod-bob"]  = {GPU 1}              │
+// │   persistedGPUs["gpu-node-01"]["default/pod-old"]  = {GPU 3} ← Pod 已删除  │
 // │                                                                           │
-// │ ── 本函数执行后期望得到的结果 ──                                         │
+// │ ── 本函数执行后期望得到的结果 ──                                               │
 // │                                                                           │
-// │   ruleGPUs = {                                                           │
-// │     规则0(ai):     {GPU 0, GPU 1},   ← ai 团队已占用 0 和 1              │
-// │     规则1(render): {GPU 2},           ← render 团队已占用 2              │
-// │   }                                                                      │
+// │   ruleGPUs = {                                                            │
+// │     规则0(ai):     {GPU 0, GPU 1},   ← ai 团队已占用 0 和 1                  │
+// │     规则1(render): {GPU 2},           ← render 团队已占用 2                  │
+// │   }                                                                       │
 // │                                                                           │
-// │ 效果：                                                                    │
-// │   新来 pod-eve (team=ai) 调度时：                                         │
-// │     → 查出规则 0 已占 GPU 0,1 → 把 GPU 0,1 临时标记为"已满"             │
-// │     → 底层分配器只能从 GPU 2,3 中选 → Eve 分到 GPU 2 或 3                │
-// │     → 这样就保证了 ai 团队的每个 Pod 都独占自己的 GPU                    │
+// │ 效果：                                                                     │
+// │   新来 pod-eve (team=ai) 调度时：                                           │
+// │     → 查出规则 0 已占 GPU 0,1 → 把 GPU 0,1 临时标记为"已满"                    │
+// │     → 底层分配器只能从 GPU 2,3 中选 → Eve 分到 GPU 2 或 3                      │
+// │     → 这样就保证了 ai 团队的每个 Pod 都独占自己的 GPU                           │
 // └───────────────────────────────────────────────────────────────────────────┘
 //
 // 整体执行流程（6 步）：

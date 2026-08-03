@@ -53,13 +53,13 @@ package gpushare
 // 全局开关变量，由 deviceshare 插件根据调度器配置初始化。
 //
 // 与 vgpu 方案的对比：
-//   - gpushare 有三个独立开关（GpuSharingEnable / GpuNumberEnable / NodeLockEnable）
+//   - gpushare 有三个独立开关(GpuSharingEnable / GpuNumberEnable / NodeLockEnable)
 //   - vgpu 只有一个总开关 VGPUEnable + NodeLockEnable
 //   - gpushare 的“共享”和“整卡”是两种独立模式，分别由不同开关控制
 //   - vgpu 统一通过 vgpu-number + vgpu-memory + vgpu-cores 三维资源请求来描述
-var GpuSharingEnable bool  // 是否启用按显存共享 GPU（volcano.sh/gpu-memory）
-var NodeLockEnable bool    // 分配 GPU 时是否对节点加分布式锁，防止并发分配冲突
-var GpuNumberEnable bool   // 是否启用按卡数分配 GPU（volcano.sh/gpu-number）
+var GpuSharingEnable bool // 是否启用按显存共享 GPU(volcano.sh/gpu-memory)
+var NodeLockEnable bool   // 分配 GPU 时是否对节点加分布式锁，防止并发分配冲突
+var GpuNumberEnable bool  // 是否启用按卡数分配 GPU(volcano.sh/gpu-number)
 
 const (
 	// DeviceName 是 gpushare 设备在 Volcano 调度器内部的注册名称。
@@ -75,8 +75,8 @@ const (
 	//
 	// 与 vgpu 对比：
 	//   gpushare 使用 "volcano.sh/gpu-memory"  —— 仅按显存分配
-	//   vgpu 使用配置化的 ResourceMemoryName（如 "volcano.sh/vgpu-memory"）
-	//         并额外支持 vgpu-cores（算力百分比）和 vgpu-number（设备数量）
+	//   vgpu 使用配置化的 ResourceMemoryName(如 "volcano.sh/vgpu-memory")
+	//         并额外支持 vgpu-cores(算力百分比)和 vgpu-number(设备数量)
 	//
 	// 使用方式示例：
 	//   limits:
@@ -87,7 +87,7 @@ const (
 	// VolcanoGPUNumber 是扩展资源名，表示 Pod 请求的 GPU 卡数量。
 	//
 	// 与 vgpu 对比：
-	//   gpushare: gpu-number 分配的是完全空闲的整卡（PodMap 为空的 GPU）
+	//   gpushare: gpu-number 分配的是完全空闲的整卡(PodMap 为空的 GPU)
 	//   vgpu:     vgpu-number 分配的是"槽位"，一张卡可被多个 Pod 共享
 	//
 	// 使用方式示例：
@@ -96,7 +96,7 @@ const (
 	// 调度器会分配 2 张空闲的完整 GPU 卡给该 Pod。
 	VolcanoGPUNumber = "volcano.sh/gpu-number"
 
-	// PredicateTime 用于在 Pod 注解中记录本次 GPU 分配 predicate 的时间戳（UnixNano）。
+	// PredicateTime 用于在 Pod 注解中记录本次 GPU 分配 predicate 的时间戳(UnixNano)
 	// 主要配合 GPUIndex 一起写入，便于排查分配时序问题。
 	//
 	// 注意：vgpu 方案也有同名常量，但注解值格式不同：
@@ -104,13 +104,13 @@ const (
 	//   vgpu:     Unix 秒精度
 	PredicateTime = "volcano.sh/predicate-time"
 
-	// GPUIndex 用于在 Pod 注解中记录最终分配的 GPU 设备索引列表。
-	// 格式为逗号分隔的整数，例如 "0,2" 表示分配到该节点的第 0 块和第 2 块 GPU。
-	// 该注解由调度器在 Allocate 阶段通过 JSON Patch 写入 Pod。
+	// GPUIndex 用于在 Pod 注解中记录最终分配的 GPU 设备索引列表
+	// 格式为逗号分隔的整数，例如 "0,2" 表示分配到该节点的第 0 块和第 2 块 GPU
+	// 该注解由调度器在 Allocate 阶段通过 JSON Patch 写入 Pod
 	//
 	// 与 vgpu 注解对比：
 	//   gpushare: gpu-index = "0,2"           （仅记录 ID）
-	//   vgpu:     vgpu-ids-new = "UUID,NVIDIA,2048,50:..." （记录 UUID + 类型 + 显存 + 核心）
+	//   vgpu:     vgpu-ids-new = "UUID,NVIDIA,2048,50:..." (记录 UUID + 类型 + 显存 + 核心)
 	GPUIndex = "volcano.sh/gpu-index"
 
 	// UnhealthyGPUIDs 是节点注解的 key，用于声明该节点上哪些 GPU 设备不可用。
