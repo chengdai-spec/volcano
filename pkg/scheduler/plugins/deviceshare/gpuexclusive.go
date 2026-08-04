@@ -855,8 +855,8 @@ func (dp *deviceSharePlugin) wrapGPUDevicesForExclusivity(ssn *framework.Session
 		//   persistedPodRules[nodeName][podKey] = 规则索引集合
 		//
 		// 恢复条件(两个必须同时满足)：
-		//   a. Pod 仍然存在于当前节点(在 podRules 中)
-		//   b. PodMap 中找不到该 Pod(否则来源 A 已处理)
+		//   a.Pod 仍然存在于当前节点(在 podRules 中)
+		//   b.PodMap 中找不到该 Pod(否则来源 A 已处理)
 		//
 		// 案例执行过程：
 		//   persistedGPUs["gpu-node-01"]["default/pod-bob"] = {1}
