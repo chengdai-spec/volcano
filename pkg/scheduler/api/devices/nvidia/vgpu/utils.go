@@ -297,7 +297,8 @@ func getPodGroupKey(pod *v1.Pod) string {
 //
 // 这是 vgpu 独有的能力，gpushare 不支持 PodGroup 级别的分散调度。
 // vgpu 通过此函数实现 PodGroup Spread 策略：
-//   同一作业的多个 Pod 分散到不同 GPU，避免单点故障。
+//
+//	同一作业的多个 Pod 分散到不同 GPU，避免单点故障。
 //
 // 参数：
 //   - gd: GPU 设备对象
@@ -364,9 +365,11 @@ func checkVGPUResourcesInPod(pod *v1.Pod) bool {
 //
 // 实际案例：
 // Pod 中容器请求 limits:
-//   volcano.sh/vgpu-number: "1"
-//   volcano.sh/vgpu-memory: "2048"
-//   volcano.sh/vgpu-cores: "50"
+//
+//	volcano.sh/vgpu-number: "1"
+//	volcano.sh/vgpu-memory: "2048"
+//	volcano.sh/vgpu-cores: "50"
+//
 // 则返回的 ContainerDeviceRequest 中 Nums=1、Memreq=2048、Coresreq=50。
 func resourcereqs(pod *v1.Pod) []devices.ContainerDeviceRequest {
 	countName := getConfig().ResourceCountName
@@ -570,7 +573,7 @@ func getSharingMode(mode string) string {
 	}
 }
 
-// checkNodeGPUSharingPredicateAndScore 检查 Pod 是否可以调度到节点并计算分数。
+// checkNodeGPUSharingPredicateAndScore 检查 Pod 是否可以调度到节点并计算分数
 //
 // 这是 vgpu 调度的核心函数，相当于 gpushare 中 predicateGPUbyMemory + predicateGPUbyNumber
 // 的超集，但复杂度高得多。

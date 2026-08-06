@@ -20,23 +20,23 @@ package vgpu
 // hamicore.go  —— HAMi-core 软件时间切片共享模式的实现
 //
 // ╔═══════════════════════════════════════════════════════════════════════════╗
-// ║ HAMi-core 模式说明：                                                      ║
-// ║                                                                          ║
-// ║  一块物理 GPU 可被多个 Pod 同时挂载，通过软件时间切片实现共享。        ║
-// ║  Volcano 调度器只负责决定 Pod 放到哪块 GPU，                         ║
-// ║  实际的显存隔离、算力限制由 HAMi device plugin 通过 CUDA Hook enforce。║
-// ║                                                                          ║
-// ║  与 gpushare 的对比：                                                      ║
+// ║ HAMi-core 模式说明：                                                        ║
+// ║                                                                           ║
+// ║  一块物理 GPU 可被多个 Pod 同时挂载，通过软件时间切片实现共享。                     ║
+// ║  Volcano 调度器只负责决定 Pod 放到哪块 GPU，                                   ║
+// ║  实际的显存隔离、算力限制由 HAMi device plugin 通过 CUDA Hook enforce。         ║
+// ║                                                                           ║
+// ║  与 gpushare 的对比：                                                       ║
 // ║  ─────────────────────────────────────────────────────────────────────────╢
-// ║  gpushare 的“显存共享”：                                              ║
-// ║    - 仅检查空闲显存 >= 请求量，不限制槽位数和核心数                 ║
-// ║    - 分配时将 Pod 放入 PodMap，无 UsedNum/UsedCore 概念            ║
-// ║    - 无运行时隔离，多个 Pod 共享 GPU 时无安全边界                  ║
-// ║                                                                          ║
-// ║  HAMi-core 的“软件切片”：                                              ║
-// ║    - 检查槽位数(UsedNum < Number)、显存、核心数三重约束              ║
-// ║    - 分配时更新 UsedNum/UsedMem/UsedCore 实时计数器                  ║
-// ║    - 运行时由 HAMi 通过 CUDA Hook 强制隔离显存和算力                ║
+// ║  gpushare 的“显存共享”：                                                    ║
+// ║    - 仅检查空闲显存 >= 请求量，不限制槽位数和核心数                               ║
+// ║    - 分配时将 Pod 放入 PodMap，无 UsedNum/UsedCore 概念                       ║
+// ║    - 无运行时隔离，多个 Pod 共享 GPU 时无安全边界                                ║
+// ║                                                                           ║
+// ║  HAMi-core 的“软件切片”：                                                   ║
+// ║    - 检查槽位数(UsedNum < Number)、显存、核心数三重约束                         ║
+// ║    - 分配时更新 UsedNum/UsedMem/UsedCore 实时计数器                           ║
+// ║    - 运行时由 HAMi 通过 CUDA Hook 强制隔离显存和算力                            ║
 // ╚═══════════════════════════════════════════════════════════════════════════╝
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -92,7 +92,7 @@ func (f HAMICoreFactory) TryAddPod(gd *GPUDevice, mem uint, core uint) (bool, st
 //     并更新设备的 UsedNum/UsedMem/UsedCore 实时计数器
 //
 // 更新设备的 UsedNum、UsedMem、UsedCore，并在 PodMap 中记录该 Pod 的资源使用。
-// 如果 Pod 已经在 PodMap 中（重复调用），直接返回 nil。
+// 如果 Pod 已经在 PodMap 中(重复调用)，直接返回 nil。
 func (f HAMICoreFactory) AddPod(gd *GPUDevice, mem uint, core uint, podUID string, devID string) error {
 	if _, ok := gd.PodMap[podUID]; ok {
 		return nil

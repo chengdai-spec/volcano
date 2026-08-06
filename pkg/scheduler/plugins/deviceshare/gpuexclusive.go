@@ -221,6 +221,14 @@ func (a *exclusiveGPUDevices) capGPUs(gpuIndices map[int]struct{}) map[int]uint 
 	saved := make(map[int]uint, len(gpuIndices))
 	for idx := range gpuIndices {
 		if dev, ok := a.inner.Device[idx]; ok && dev != nil {
+			/*
+				底层分配器判断 GPU 是否还能放新 Pod 的关键条件(hamicore.go)是:
+				dev.Number > dev.UsedNum  → 还有空闲槽位，可以放
+				UsedNum >= Number → 已满，跳过
+
+				saved[idx] = dev.Number   // ① 备份原始的槽位上限（比如 10）
+				dev.Number = dev.UsedNum  // ② 把上限改成"当前已用数"（比如 2）
+			*/
 			saved[idx] = dev.Number
 			dev.Number = dev.UsedNum
 		}
