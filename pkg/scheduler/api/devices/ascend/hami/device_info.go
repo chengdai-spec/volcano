@@ -24,17 +24,18 @@ limitations under the License.
 //     JSON Patch 写回 Pod 注解，供设备插件最终挂载对应的虚拟设备。
 //
 // 实际案例：
-//  某训练 Pod 声明 limits:
-//    huawei.com/Ascend910A: 2
-//    huawei.com/Ascend910A-memory: 8192
-//  节点上存在 8 张 Ascend910A，每张 32GB 显存、30 个 AI Core，并已在注解
-//  "hami.io/node-register-Ascend910A" 中上报了设备列表。HAMi 调度器会：
-//    (1) 把每个容器的请求解析为 2 个 Ascend910A，每个显存需求 8192MB；
-//    (2) 使用 trimMemory 把 8192 向上对齐到最近的 vNPU 模板（如 vir08 8738MB）；
-//    (3) 在 fit 中检查每张卡的剩余 Count/Memory/Core；
-//    (4) 如果节点开启了 NetworkID 拓扑（Ascend910 常见），优先把同一 PodGroup
-//        的 Pod 调度到同一个网络域，减少跨交换机通信；
-//    (5) 把选中的设备 UUID、模板名等通过注解写回 Pod，设备插件据此创建 vNPU。
+//
+//	某训练 Pod 声明 limits:
+//	  huawei.com/Ascend910A: 2
+//	  huawei.com/Ascend910A-memory: 8192
+//	节点上存在 8 张 Ascend910A，每张 32GB 显存、30 个 AI Core，并已在注解
+//	"hami.io/node-register-Ascend910A" 中上报了设备列表。HAMi 调度器会：
+//	  (1) 把每个容器的请求解析为 2 个 Ascend910A，每个显存需求 8192MB；
+//	  (2) 使用 trimMemory 把 8192 向上对齐到最近的 vNPU 模板（如 vir08 8738MB）；
+//	  (3) 在 fit 中检查每张卡的剩余 Count/Memory/Core；
+//	  (4) 如果节点开启了 NetworkID 拓扑（Ascend910 常见），优先把同一 PodGroup
+//	      的 Pod 调度到同一个网络域，减少跨交换机通信；
+//	  (5) 把选中的设备 UUID、模板名等通过注解写回 Pod，设备插件据此创建 vNPU。
 package hami
 
 import (
@@ -141,9 +142,10 @@ var (
 //  5. 把每张真实设备包装成 AscendDevice 并加入 AscendDevices.Devices。
 //
 // 实际案例：
-//  节点 node-ascend-01 的 Allocatable 中有 huawei.com/Ascend310P: 8，
-//  注解 hami.io/node-register-Ascend310P 包含 8 张卡的 UUID、显存、AI Core 等信息。
-//  该函数会生成 Type=Ascend310P 的 AscendDevices，Devices 里保存 8 个 AscendDevice。
+//
+//	节点 node-ascend-01 的 Allocatable 中有 huawei.com/Ascend310P: 8，
+//	注解 hami.io/node-register-Ascend310P 包含 8 张卡的 UUID、显存、AI Core 等信息。
+//	该函数会生成 Type=Ascend310P 的 AscendDevices，Devices 里保存 8 个 AscendDevice。
 func NewAscendDevices(name string, node *v1.Node) map[string]*AscendDevices {
 	ascendDevices := make(map[string]*AscendDevices)
 	if node == nil {
@@ -320,8 +322,9 @@ func (ads *AscendDevices) AddQueueResource(pod *v1.Pod) map[string]float64 {
 // 是否包含资源名或显存资源名。
 //
 // 实际案例：
-//  若 Pod 中某个容器 limits 有 huawei.com/Ascend310P: 1，则返回 true，
-//  deviceShare 插件会继续调用 FilterNode/ScoreNode。
+//
+//	若 Pod 中某个容器 limits 有 huawei.com/Ascend310P: 1，则返回 true，
+//	deviceShare 插件会继续调用 FilterNode/ScoreNode。
 func (ads *AscendDevices) HasDeviceRequest(pod *v1.Pod) bool {
 	if !AscendHAMiVNPUEnable {
 		return false
@@ -368,8 +371,9 @@ func (ads *AscendDevices) FilterNode(pod *v1.Pod, policy string) (int, string, e
 //     同一 NetworkID 的设备越多，得分越高。
 //
 // 实际案例：
-//  某推理 Pod 请求 2 张 Ascend910B，节点 A 的两张卡都在 NetworkID=1 的域，
-//  节点 B 的两张卡分别在不同域，则节点 A 会得到更高 ScoreNode 分数。
+//
+//	某推理 Pod 请求 2 张 Ascend910B，节点 A 的两张卡都在 NetworkID=1 的域，
+//	节点 B 的两张卡分别在不同域，则节点 A 会得到更高 ScoreNode 分数。
 func (ads *AscendDevices) ScoreNode(pod *v1.Pod, policy string) float64 {
 	ads.Policy = policy
 	podDevs, err := ads.selectDevices(pod, policy)
@@ -535,15 +539,16 @@ func (ads *AscendDevices) DeepCopy() interface{} {
 //     a. 用 verifyReq 校验请求合法性（多设备时不允许部分显存）；
 //     b. 依次检查 fit，挑选可用设备，去重已选设备；
 //     c. 如果 needTopology 为 true，调用 selectDevicesWithTopology 在已选设备中
-//        优先选择同一 NetworkID 的设备；
+//     优先选择同一 NetworkID 的设备；
 //     d. 把最终设备组装成 devices.ContainerDevice 列表。
 //  5. 返回 devices.PodSingleDevice（每个容器对应一组设备）。
 //
 // 实际案例：
-//  Pod 有 2 个容器，每个容器请求 Ascend910A-memory: 8192。
-//  节点有 8 张卡，排序后优先选择已用显存最多的卡（binpack）。
-//  对第一个容器， fit 检查通过则选择一张卡；第二个容器同理但跳过已选卡。
-//  若 8 张卡分属 2 个 NetworkID，selectDevicesWithTopology 会让两张卡尽量来自同一域。
+//
+//	Pod 有 2 个容器，每个容器请求 Ascend910A-memory: 8192。
+//	节点有 8 张卡，排序后优先选择已用显存最多的卡（binpack）。
+//	对第一个容器， fit 检查通过则选择一张卡；第二个容器同理但跳过已选卡。
+//	若 8 张卡分属 2 个 NetworkID，selectDevicesWithTopology 会让两张卡尽量来自同一域。
 func (ads *AscendDevices) selectDevices(pod *v1.Pod, schedulePolicy string) (devices.PodSingleDevice, error) {
 	dupDevs := getDeviceSnapshot(ads)
 	if len(dupDevs) == 0 {
@@ -760,8 +765,9 @@ func (ads *AscendDevices) getFirstDevice() (*AscendDevice, error) {
 //  3. 如果 m > MemoryCapacity，返回 0，表示无法满足。
 //
 // 实际案例：
-//  Ascend310P 配置模板 vir01/3072MB、vir02/6144MB、vir04/12288MB，
-//  请求 5000MB 会向上对齐到 vir02 的 6144MB；请求 15000MB 则对齐到 memoryAllocatable 21527MB。
+//
+//	Ascend310P 配置模板 vir01/3072MB、vir02/6144MB、vir04/12288MB，
+//	请求 5000MB 会向上对齐到 vir02 的 6144MB；请求 15000MB 则对齐到 memoryAllocatable 21527MB。
 func (dev *AscendDevice) trimMemory(m int64) (int64, string) {
 	for i := range dev.config.Templates {
 		if m <= dev.config.Templates[i].Memory {
@@ -915,7 +921,9 @@ func (dev *AscendDevice) GetResourceNames() devices.ResourceNames {
 //
 // binpack: 已用显存 / 总显存 越大越好，鼓励堆叠；
 // spread:  当该卡已被占用一次（Used==1）时给满分，鼓励把任务放到已占用的卡上，
-//          留出更多空闲整卡；
+//
+//	留出更多空闲整卡；
+//
 // 其他策略默认 0 分。
 func CalScore(schedulePolicy string, dev_usage *devices.DeviceUsage, dev_info *devices.DeviceInfo) float64 {
 	var score float64

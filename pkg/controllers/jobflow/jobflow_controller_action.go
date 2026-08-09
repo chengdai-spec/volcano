@@ -39,7 +39,7 @@ import (
 // 由状态机（state 包）通过 SyncJobFlow 变量调用
 // 流程：
 //  1. 如果 JobFlow 已成功且保留策略为 Delete，则删除所有子 Job
-//  2. 按依赖顺序部署 Job（从 JobTemplate 创建 VCJob）
+//  2. 按依赖顺序部署 Job(从 JobTemplate 创建 VCJob)
 //  3. 收集所有子 Job 的状态，构建 JobFlowStatus
 //  4. 调用 updateStateFn 根据子 Job 状态计算 JobFlow 的新 Phase
 //  5. 将更新后的 Status 写入 API Server

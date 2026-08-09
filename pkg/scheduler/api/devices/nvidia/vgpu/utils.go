@@ -496,6 +496,7 @@ func getGPUDeviceSnapShot(snap *GPUDevices) *GPUDevices {
 		Score:   float64(0),
 		Sharing: snap.Sharing,
 	}
+
 	for index, val := range snap.Device {
 		if val != nil {
 			// 深拷贝 PodMap
@@ -589,9 +590,9 @@ func getSharingMode(mode string) string {
 //
 // 参数：
 //   - pod: 要调度的 Pod
-//   - gssnap: GPU 设备快照（replicate=true 时传入快照）
-//   - replicate: 是否为干跑模式（true=模拟分配，false=真实分配）
-//   - schedulePolicy: 调度策略（binpack 或 spread）
+//   - gssnap: GPU 设备快照(replicate=true 时传入快照)
+//   - replicate: 是否为干跑模式(true=模拟分配，false=真实分配)
+//   - schedulePolicy: 调度策略(binpack 或 spread)
 //
 // 返回值：
 //   - bool: 是否可以调度
@@ -606,7 +607,7 @@ func getSharingMode(mode string) string {
 // 4. 遍历每个容器的请求，尝试分配到合适的 GPU
 // 5. 如果所有请求都满足，返回成功和分配结果
 //
-// 分配检查（按顺序）：
+// 分配检查(按顺序)：
 //   - GPU 健康且还有空闲槽位（UsedNum < Number）
 //   - PodGroup Spread：避免同组 Pod 在同一 GPU
 //   - 显存足够（剩余显存 >= 请求显存，支持百分比请求）
@@ -680,7 +681,7 @@ func checkNodeGPUSharingPredicateAndScore(pod *v1.Pod, gssnap *GPUDevices, repli
 	// 阶段 5：PodGroup Spread 策略初始化
 	// ═══════════════════════════════════════════════════════════════
 	// 如果 Pod 设置了 volcano.sh/vgpu-podgroup-policy: "spread" 注解，
-	// 则需要确保同一 PodGroup（同一作业）的多个 Pod 分散到不同 GPU 上，
+	// 则需要确保同一 PodGroup(同一作业)的多个 Pod 分散到不同 GPU 上，
 	// 避免单点故障，提高容错性。
 	// currentPodGroupKey 格式为 "namespace/groupName"
 	var currentPodGroupKey string
@@ -712,17 +713,17 @@ func checkNodeGPUSharingPredicateAndScore(pod *v1.Pod, gssnap *GPUDevices, repli
 			if alloc.device == nil {
 				continue
 			}
-			// 回滚占用数：UsedNum--（不低于 0）
+			// 回滚占用数：UsedNum--(不低于 0)
 			if alloc.device.UsedNum > 0 {
 				alloc.device.UsedNum--
 			}
-			// 回滚显存：UsedMem -= mem（不低于 0）
+			// 回滚显存：UsedMem -= mem(不低于 0)
 			if alloc.device.UsedMem >= alloc.mem {
 				alloc.device.UsedMem -= alloc.mem
 			} else {
 				alloc.device.UsedMem = 0
 			}
-			// 回滚核心：UsedCore -= core（不低于 0）
+			// 回滚核心：UsedCore -= core(不低于 0)
 			if alloc.device.UsedCore >= alloc.core {
 				alloc.device.UsedCore -= alloc.core
 			} else {
@@ -737,12 +738,12 @@ func checkNodeGPUSharingPredicateAndScore(pod *v1.Pod, gssnap *GPUDevices, repli
 	ctrdevs := []ContainerDevices{}
 
 	// ═══════════════════════════════════════════════════════════════
-	// 阶段 7：逐容器分配 GPU 设备（核心循环）
+	// 阶段 7：逐容器分配 GPU 设备(核心循环)
 	// ═══════════════════════════════════════════════════════════════
 	// 遍历 Pod 中每个容器的 GPU 请求，为每个容器分配足够的 GPU
 	for _, val := range ctrReq {
 		// devs: 当前容器分配到的设备列表
-		devs := []ContainerDevice{}
+		devs := make([]ContainerDevice, 0)
 
 		// 前置检查：请求的 GPU 数量不能超过节点上的 GPU 总数
 		if int(val.Nums) > len(gs.Device) {
@@ -763,7 +764,7 @@ func checkNodeGPUSharingPredicateAndScore(pod *v1.Pod, gssnap *GPUDevices, repli
 			klog.V(3).InfoS("Current Device", "Index", i, "TotalMemory", gs.Device[i].Memory, "UsedMemory", gs.Device[i].UsedMem, "UsedCores", gs.Device[i].UsedCore, "UsedNum", gs.Device[i].UsedNum, "Number", gs.Device[i].Number, "replicate", replicate)
 
 			// ─── 约束检查 1：GPU 槽位容量 ───────────────────────────
-			// Number 表示该 GPU 最大可共享的 Pod 数（虚拟 GPU 槽位总数），
+			// Number 表示该 GPU 最大可共享的 Pod 数(虚拟 GPU 槽位总数)，
 			// UsedNum 表示已分配的 Pod 数。如果已用数 >= 总数，无空闲槽位
 			if gs.Device[i].Number <= uint(gs.Device[i].UsedNum) {
 				continue
@@ -856,8 +857,8 @@ func checkNodeGPUSharingPredicateAndScore(pod *v1.Pod, gssnap *GPUDevices, repli
 					Usedcores: uint(val.Coresreq),
 				})
 				// 累加节点分数：
-				//   binpack 模式：已用显存比例越高得分越高（鼓励填满）
-				//   spread 模式：空闲 GPU 得分高（鼓励分散）
+				//   binpack 模式：已用显存比例越高得分越高(鼓励填满)
+				//   spread 模式：空闲 GPU 得分高(鼓励分散)
 				score += GPUScore(schedulePolicy, gs.Device[i])
 			}
 			// 当前容器的所有 GPU 需求已满足，跳出设备遍历循环
@@ -895,8 +896,8 @@ func checkNodeGPUSharingPredicateAndScore(pod *v1.Pod, gssnap *GPUDevices, repli
 // 与 gpushare 对比：
 //   - gpushare 没有策略概念，始终按 ID 升序遍历，取第一个满足条件的 GPU
 //   - vgpu 支持三种排序策略：
-//     binpack: 已用显存多的优先（集中任务，留整卡空闲）
-//     spread:  已用槽位少的优先（分散任务，减少竞争）
+//     binpack: 已用显存多的优先(集中任务，留整卡空闲)
+//     spread:  已用槽位少的优先(分散任务，减少竞争)
 //     default: 按索引逆序遍历
 //
 // 参数：
@@ -907,12 +908,12 @@ func checkNodeGPUSharingPredicateAndScore(pod *v1.Pod, gssnap *GPUDevices, repli
 //   - []int: 排序后的设备索引列表
 //
 // 支持的策略：
-// 1. binpackPolicy（紧凑策略）：
+// 1. binpackPolicy(紧凑策略)：
 //   - 优先选择已用显存多的 GPU
 //   - 目标：让任务集中在少数 GPU 上，留出更多空闲 GPU
 //   - 适用场景：提高资源利用率，减少碎片
 //
-// 2. spreadPolicy（分散策略）：
+// 2. spreadPolicy(分散策略)：
 //   - 优先选择已用槽位少的 GPU
 //   - 目标：让任务分散到不同 GPU 上
 //   - 适用场景：提高并行性能，减少竞争
@@ -955,11 +956,11 @@ func sortedDeviceIndicesByPolicy(gs *GPUDevices, schedulePolicy string) []int {
 
 // GPUScore 计算单个 GPU 设备的分数。
 //
-// 与 gpushare 对比：
+// 与 gpushare 对比:
 //   - gpushare 无打分机制，ScoreNode 固定返回 0
-//   - vgpu 根据策略计算每个 GPU 的打分：
-//     binpack: 已用显存比例越高，分数越高（鼓励集中）
-//     spread:  完全空闲的 GPU 得分最高（鼓励分散）
+//   - vgpu 根据策略计算每个 GPU 的打分:
+//     binpack: 已用显存比例越高，分数越高(鼓励集中)
+//     spread:  完全空闲的 GPU 得分最高(鼓励分散)
 //
 // 参数：
 //   - schedulePolicy: 调度策略
