@@ -1040,8 +1040,8 @@ func calcPodStatus(pod *v1.Pod, taskStatusCount map[string]batch.TaskState) {
 	}
 }
 
-// isInitiated 判断 Job 是否已经初始化。
-// 如果 Phase 为空或者 Pending，认为还没有真正完成初始化。
+// isInitiated 判断 Job 是否已经初始化
+// 如果 Phase 为空或者 Pending，认为还没有真正完成初始化
 func isInitiated(job *batch.Job) bool {
 	if job.Status.State.Phase == "" || job.Status.State.Phase == batch.Pending {
 		return false
@@ -1057,8 +1057,8 @@ func newCondition(status batch.JobPhase, lastTransitionTime *metav1.Time) batch.
 	}
 }
 
-// setPgSubGroupPolicy 根据 Task 的 PartitionPolicy 初始化 PodGroup 的 SubGroupPolicy。
-// SubGroupPolicy 用于描述分区调度策略。
+// setPgSubGroupPolicy 根据 Task 的 PartitionPolicy 初始化 PodGroup 的 SubGroupPolicy
+// SubGroupPolicy 用于描述分区调度策略
 func setPgSubGroupPolicy(pg *scheduling.PodGroup, tasks []batch.TaskSpec) {
 	pg.Spec.SubGroupPolicy = make([]scheduling.SubGroupPolicySpec, 0)
 	for _, taskSpec := range tasks {
@@ -1070,8 +1070,8 @@ func setPgSubGroupPolicy(pg *scheduling.PodGroup, tasks []batch.TaskSpec) {
 	}
 }
 
-// updatePgSubGroupPolicy 更新 PodGroup 的 SubGroupPolicy。
-// 如果新旧 SubGroupPolicy 不一致，则返回 true，表示需要更新 PodGroup。
+// updatePgSubGroupPolicy 更新 PodGroup 的 SubGroupPolicy
+// 如果新旧 SubGroupPolicy 不一致，则返回 true，表示需要更新 PodGroup
 func updatePgSubGroupPolicy(pg *scheduling.PodGroup, tasks []batch.TaskSpec) bool {
 	subGroupPolicyShouldUpdate := false
 

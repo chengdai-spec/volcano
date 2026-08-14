@@ -77,13 +77,13 @@ func init() {
 	framework.RegisterController(&jobcontroller{})
 }
 
-// delayAction 表示一个“延迟执行动作”。
+// delayAction 表示一个"延迟执行动作"
 //
-// Volcano Job Controller 中有些事件不会立即触发动作，而是延迟一段时间后再执行。
+// Volcano Job Controller 中有些事件不会立即触发动作，而是延迟一段时间后再执行
 // 典型场景：
-//   - Pod Pending 后等待一段时间，如果仍未恢复，再执行某个动作；
-//   - Pod Failed 后等待一段时间，再重启任务或终止 Job；
-//   - Pod Evicted 后等待一段时间，再执行恢复逻辑。
+//   - Pod Pending 后等待一段时间，如果仍未恢复，再执行某个动作
+//   - Pod Failed 后等待一段时间，再重启任务或终止 Job
+//   - Pod Evicted 后等待一段时间，再执行恢复逻辑
 //
 // 延迟动作需要支持取消。
 // 因为 Pod 状态可能在 delay 时间到达前发生变化，比如 Pending -> Running，
@@ -334,16 +334,16 @@ func (cc *jobcontroller) Initialize(opt *framework.ControllerOption) error {
 		cc.queueList[i] = workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[any]())
 	}
 
-	// Volcano CRD informer factory。
+	// Volcano CRD informer factory
 	factory := opt.VCSharedInformerFactory
 	cc.vcInformerFactory = factory
 
-	// 如果开启 VolcanoJobSupport，则监听 Volcano Job。
+	// 如果开启 VolcanoJobSupport，则监听 Volcano Job
 	if utilfeature.DefaultFeatureGate.Enabled(features.VolcanoJobSupport) {
 		cc.jobInformer = factory.Batch().V1alpha1().Jobs()
 
-		// 注册 Job 事件处理函数。
-		// 这些函数通常会把 Job 对应的 Request 加入工作队列。
+		// 注册 Job 事件处理函数
+		// 这些函数通常会把 Job 对应的 Request 加入工作队列
 		cc.jobInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 			AddFunc:    cc.addJob,
 			UpdateFunc: cc.updateJob,
@@ -399,21 +399,21 @@ func (cc *jobcontroller) Initialize(opt *framework.ControllerOption) error {
 	cc.podLister = cc.podInformer.Lister()
 	cc.podSynced = cc.podInformer.Informer().HasSynced
 
-	// PVC informer。
-	// Job 可能声明 Volume，需要创建或检查 PVC。
+	// PVC informer
+	// Job 可能声明 Volume，需要创建或检查 PVC
 	cc.pvcInformer = sharedInformers.Core().V1().PersistentVolumeClaims()
 	cc.pvcLister = cc.pvcInformer.Lister()
 	cc.pvcSynced = cc.pvcInformer.Informer().HasSynced
 
-	// Service informer。
-	// 一些插件或任务可能需要 Service。
+	// Service informer
+	// 一些插件或任务可能需要 Service
 	cc.svcInformer = sharedInformers.Core().V1().Services()
 	cc.svcLister = cc.svcInformer.Lister()
 	cc.svcSynced = cc.svcInformer.Informer().HasSynced
 
-	// PodGroup informer。
-	// PodGroup 是 Volcano gang scheduling 的关键资源。
-	// 当 PodGroup 状态变化时，Job Controller 需要重新同步 Job。
+	// PodGroup informer
+	// PodGroup 是 Volcano gang scheduling 的关键资源
+	// 当 PodGroup 状态变化时，Job Controller 需要重新同步 Job
 	cc.pgInformer = factory.Scheduling().V1beta1().PodGroups()
 	cc.pgInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		UpdateFunc: cc.updatePodGroup,
@@ -497,10 +497,10 @@ func (cc *jobcontroller) Run(stopCh <-chan struct{}) {
 		}(i)
 	}
 
-	// 启动内部 cache。
+	// 启动内部 cache
 	go cc.cache.Run(stopCh)
 
-	// 启动错误任务重同步循环。
+	// 启动错误任务重同步循环
 	go wait.Until(cc.processResyncTask, 0, stopCh)
 
 	klog.Infof("JobController is running ...... ")

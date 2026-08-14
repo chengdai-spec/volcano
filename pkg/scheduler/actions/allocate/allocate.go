@@ -25,15 +25,15 @@
 //  6. 节点打分 → 用打分函数(NodeOrderFn)选出最优节点，将任务绑定到该节点
 //
 // 核心概念说明：
-//   - HyperNode（超级节点）：Volcano 的网络拓扑层次结构，可以理解为机架、交换机等物理分组。
+//   - HyperNode(超级节点)：Volcano 的网络拓扑层次结构，可以理解为机架、交换机等物理分组。
 //     HyperNode 构成一棵树，叶子节点是真实的 Kubernetes 节点，非叶子节点代表交换机/机架等。
-//   - Gradient（梯度）：当在低层 HyperNode 找不到足够资源时，逐层向上扩大搜索范围。
+//   - Gradient(梯度)：当在低层 HyperNode 找不到足够资源时，逐层向上扩大搜索范围。
 //     例如：先在同一个机架内找 → 找不到就扩大到同一排机架 → 再找不到就扩大到整个集群。
-//   - SubJob（子作业）：一个 Job 可以按标签选择器拆分成多个 SubJob，每个 SubJob 可以有独立的
-//     网络拓扑策略（硬性/软性模式）和最小可用副本数要求。
-//   - Nomination（提名）：抢占动作（preempt/reclaim）可以给 SubJob 指定一个「提名 HyperNode」，
+//   - SubJob(子作业)：一个 Job 可以按标签选择器拆分成多个 SubJob，每个 SubJob 可以有独立的
+//     网络拓扑策略(硬性/软性模式)和最小可用副本数要求。
+//   - Nomination(提名)：抢占动作(preempt/reclaim)可以给 SubJob 指定一个「提名 HyperNode」，
 //     分配时优先尝试该 HyperNode，跳过耗时的梯度搜索，这是快速路径。
-//   - Worksheet（工作表）：调度过程中用于跟踪剩余待调度任务的临时数据结构，
+//   - Worksheet(工作表)：调度过程中用于跟踪剩余待调度任务的临时数据结构，
 //     每次尝试不同 HyperNode 时会克隆工作表，互不影响。
 package allocate
 
@@ -62,10 +62,10 @@ import (
 // allocateContext 是整个分配动作的上下文数据，保存了调度循环中需要的所有中间状态。
 // 它把队列、作业、子作业、任务分层组织起来，方便逐层遍历调度。
 type allocateContext struct {
-	queues              *util.PriorityQueue                 // 按优先级排列的队列（Queue）优先队列，每次弹出优先级最高的队列
+	queues              *util.PriorityQueue                 // 按优先级排列的队列(Queue)优先队列，每次弹出优先级最高的队列
 	jobsByQueue         map[api.QueueID]*util.PriorityQueue // 每个队列下的作业优先队列，key 是队列 ID
 	jobWorksheet        map[api.JobID]*JobWorksheet         // 每个作业的工作表，记录该作业下还有哪些 SubJob 和 Task 待调度
-	tasksNoHardTopology map[api.JobID]*util.PriorityQueue   // 没有硬性网络拓扑策略的作业的任务队列（直接分配，不走拓扑搜索）
+	tasksNoHardTopology map[api.JobID]*util.PriorityQueue   // 没有硬性网络拓扑策略的作业的任务队列(直接分配，不走拓扑搜索)
 }
 
 // JobWorksheet 作业工作表，跟踪一个 Job 下还有哪些 SubJob 需要调度，
@@ -232,7 +232,7 @@ func (alloc *Action) buildAllocateContext() *allocateContext {
 			}
 		}
 
-		// 作业合法性校验（比如队列是否超过配额等），不通过则跳过
+		// 作业合法性校验(比如队列是否超过配额等)，不通过则跳过
 		if vr := ssn.JobValid(job); vr != nil && !vr.Pass {
 			klog.V(4).Infof("Job <%s/%s> Queue <%s> skip allocate, reason: %v, message %v", job.Namespace, job.Name, job.Queue, vr.Reason, vr.Message)
 			continue
@@ -253,7 +253,7 @@ func (alloc *Action) buildAllocateContext() *allocateContext {
 			continue
 		}
 
-		// 组织作业的工作表（把 SubJob 和 Task 按优先级排列好）
+		// 组织作业的工作表(把 SubJob 和 Task 按优先级排列好)
 		worksheet := alloc.organizeJobWorksheet(job)
 		if worksheet.Empty() {
 			continue
@@ -282,7 +282,7 @@ func (alloc *Action) buildAllocateContext() *allocateContext {
 }
 
 // organizeJobWorksheet 为一个作业组织工作表，确定哪些 SubJob 需要调度，
-// 哪些 SubJob 是「必须」的（满足作业运行的最小子集），并把待调度的 Task 加入到各 SubJob 的工作表中。
+// 哪些 SubJob 是「必须」的(满足作业运行的最小子集)，并把待调度的 Task 加入到各 SubJob 的工作表中。
 //
 // 关键逻辑：
 //   - 已就绪的 SubJob 会被跳过（不需要再分配资源）
@@ -678,7 +678,7 @@ func (alloc *Action) allocateResources(actx *allocateContext) {
 			tasks, tasksExist := actx.tasksNoHardTopology[job.UID]
 			if sjExist && tasksExist {
 				klog.V(3).InfoS("Try to allocate resource", "queue", queue.Name, "job", job.UID, "taskNum", tasks.Len())
-				// 在集群顶层（所有节点范围）分配
+				// 在集群顶层(所有节点范围)分配
 				stmt := alloc.allocateResourcesForTasks(subJob, tasks, framework.ClusterTopHyperNode)
 				if stmt != nil && ssn.JobReady(job) { // 作业就绪时才提交
 					stmt.Commit()
@@ -1126,28 +1126,64 @@ func invalidateSubJobNomination(subJob *api.SubJobInfo, subJobWorksheet *SubJobW
 // allocateResourcesForTasks 在指定的 HyperNode 范围内，逐个 Task 进行资源分配。
 // 这是分配的核心方法，负责：
 //  1. 检查队列是否可分配、Task 是否被调度门阻挡
-//  2. 预谓词（PrePredicate）过滤
-//  3. 谓词（Predicate）过滤——找出所有满足条件的节点
-//  4. 打分（Prioritize）选择最优节点
-//  5. 执行分配（Allocate 或 Pipeline）
+//  2. 预谓词(PrePredicate)过滤
+//  3. 谓词(Predicate)过滤——找出所有满足条件的节点
+//  4. 打分(Prioritize)选择最优节点
+//  5. 执行分配(Allocate 或 Pipeline)
 //
 // 分配结果：
 //   - 如果 SubJob 已就绪 → 返回 Statement
 //   - 如果 SubJob 已流水线化 → 返回 Statement
 //   - 否则 → 丢弃 Statement 并返回 nil（说明没有成功分配到足够的 Task）
+//
+// allocateResourcesForTasks 为指定子作业（SubJob）的一批 Task 分配节点资源。
+//
+// 该函数是 allocate 动作的核心分配逻辑，负责将优先级队列中的 Task 逐个分配到
+// HyperNode 下的真实节点上。整个流程遵循"检查 → 过滤 → 打分 → 分配"的调度管线模式。
+//
+// 整体流程：
+//  1. 获取 HyperNode 下的真实节点列表，构建节点名称集合
+//  2. 创建 Statement 事务容器，收集所有分配操作
+//  3. 逐个弹出 Task，依次执行以下检查：
+//     a. 队列可分配性检查（Allocatable）：队列是否超额使用
+//     b. 调度门处理（SchedulingGates）：异步移除队列准入调度门
+//     c. 谓词失败缓存检查：该角色是否已有失败记录，避免重复计算
+//     d. 预谓词检查（PrePredicateFn）：快速排除全局不可调度的 Task
+//     e. 谓词过滤（PredicateNodes）：在所有节点上执行详细过滤
+//     - 优先尝试提名节点（NominatedNodeName，来自抢占结果）
+//     - 提名节点不可用时，回退到全量节点过滤
+//     f. 节点打分选择（prioritizeNodes）：从通过过滤的节点中选最优
+//     g. 资源分配（allocateResourcesForTask）：直接分配或流水线分配
+//  4. 每次分配后检查 SubJob 是否已就绪（满足 minAvailable），就绪则提前结束
+//  5. 最终判定：
+//     - SubJob 就绪（Ready）→ 返回 Statement，等待 Commit
+//     - SubJob 流水线化（Pipelined）→ 返回 Statement，等待资源释放
+//     - 两者都不满足 → Discard 回滚所有操作，返回 nil
+//
+// 参数：
+//   - subJob: 子作业信息，包含 Job ID、minAvailable 等
+//   - tasks: 按优先级排序的待分配 Task 队列
+//   - hyperNode: 目标 HyperNode 名称，限定分配的节点范围
+//
+// 返回：分配成功时返回 Statement（包含所有分配操作），失败时返回 nil
 func (alloc *Action) allocateResourcesForTasks(subJob *api.SubJobInfo, tasks *util.PriorityQueue, hyperNode string) *framework.Statement {
 	ssn := alloc.session
 
+	// 通过子作业的 Job ID 获取完整的 JobInfo 和 QueueInfo
 	job := ssn.Jobs[subJob.Job]
 	queue := ssn.Queues[job.Queue]
-	// 获取该 HyperNode 下的真实节点列表
+
+	// ── 步骤 1：获取 HyperNode 下的真实节点列表 ──────────────────────────
+	// HyperNode 是 Volcano 的拓扑抽象，一个 HyperNode 下包含多个真实节点。
+	// 例如：HyperNode "rack-1" 可能包含 node-1、node-2 两个真实节点。
 	nodes, exist := ssn.RealNodesList[hyperNode]
 	if !exist || len(nodes) == 0 {
 		klog.V(4).InfoS("There is no node in hyperNode", "job", job.UID, "hyperNode", hyperNode)
 		return nil
 	}
 
-	// 构建节点名称集合，用于验证提名节点是否属于当前 HyperNode
+	// 构建节点名称集合，用于后续验证提名节点(NominatedNodeName)是否属于当前 HyperNode
+	// 这是一种安全校验，防止跨拓扑域的节点被错误选用
 	nodeNameSet := make(map[string]struct{}, len(nodes))
 	for _, n := range nodes {
 		if n != nil {
@@ -1155,32 +1191,44 @@ func (alloc *Action) allocateResourcesForTasks(subJob *api.SubJobInfo, tasks *ut
 		}
 	}
 
+	// ── 步骤 2：创建 Statement 事务容器 ──────────────────────────────────
+	// Statement 收集本次分配周期内的所有操作(Allocate/Pipeline)
+	// 最终统一 Commit(提交到 apiserver)或 Discard(回滚所有变更)
 	stmt := framework.NewStatement(ssn)
+
+	// PredicateHelper 封装了谓词过滤逻辑，支持谓词错误缓存以提高性能
 	ph := util.NewPredicateHelper()
 
-	// 记录子作业的已分配 HyperNode，用于软性拓扑模式
+	// 记录子作业在当前分配轮次中已分配 Task 所在的 HyperNode，
+	// 用于软性网络拓扑模式：尽量让 Task 集中在同一拓扑域内。
 	allocatedHyperNode := subJob.AllocatedHyperNode
 
-	// 逐个 Task 尝试分配
+	// ── 步骤 3：逐个 Task 尝试分配 ───────────────────────────────────────
 	for !tasks.Empty() {
+		// 按优先级弹出 Task（优先级高的先分配）
 		task := tasks.Pop().(*api.TaskInfo)
 
-		// 检查队列是否可分配
+		// ── 3a. 队列可分配性检查 ─────────────────────────────────────────
+		// 检查队列的资源配额是否已超额使用
+		// 如果队列已超配额，跳过当前 Task（但不终止循环，因为后续 Task 可能更小）
 		if !ssn.Allocatable(queue, task) {
 			klog.V(3).Infof("Queue <%s> is overused when considering task <%s>, ignore it.", queue.Name, task.Name)
 			continue
 		}
 
-		// 如果 Task 通过了分配检查且有队列准入调度门（QueueAllocationGate），
-		// 异步移除调度门。实际移除由后台工作器完成（尽力而为）。
+		// ── 3b. 调度门（SchedulingGates）处理 ─────────────────────────────
+		// 如果启用了 SchedulingGates 特性，且 Task 带有队列准入调度门注解，
+		// 则异步将 Task 加入调度门管理器的移除队列。
+		// 实际移除由后台工作器完成（尽力而为，不阻塞当前调度流程）。
 		if utilfeature.DefaultFeatureGate.Enabled(features.SchedulingGatesQueueAdmission) &&
 			task.SchGated && api.HasQueueAllocationGateAnnotation(task.Pod) {
 			klog.V(3).Infof("Task %s/%s has the QueueAllocationGate, queue async gate removal", task.Namespace, task.Name)
 			ssn.SchGateManager().Enqueue(task)
 		}
 
-		// 跳过有调度门的 Task。如果用户添加了 Volcano 调度门但没有配置准入注解，
-		// 发出警告，因为这个调度门永远不会被自动移除。
+		// 如果 Task 仍有调度门（gate 尚未被移除），跳过本次分配。
+		// 同时检查：如果 Task 只有 Volcano 调度门但没有准入注解，发出警告
+		// （这种情况意味着调度门永远不会被自动移除，可能是配置错误）。
 		if task.SchGated {
 			if api.HasOnlyVolcanoSchedulingGate(task.Pod) && !api.HasQueueAllocationGateAnnotation(task.Pod) {
 				klog.Warningf("Task %s/%s has Volcano scheduling gate but missing the opt-in annotation %q; gate will not be removed automatically",
@@ -1189,8 +1237,9 @@ func (alloc *Action) allocateResourcesForTasks(subJob *api.SubJobInfo, tasks *ut
 			continue
 		}
 
-		// 检查该 Task 的角色规格（TaskRole）是否已经有谓词失败的缓存
-		// 如果已经失败过，跳过该 Task，避免重复计算
+		// ── 3c. 谓词失败缓存检查 ─────────────────────────────────────────
+		// 如果该 Task 的角色规格（TaskRole）在本轮调度中已有谓词失败记录，
+		// 直接跳过，避免对相同角色规格的 Task 重复执行耗时的谓词检查。
 		if job.TaskHasFitErrors(subJob.UID, task) {
 			msg := fmt.Sprintf("Task %s with role spec %s has already predicated failed, skip", task.Name, task.TaskRole)
 			klog.V(5).Info(msg)
@@ -1202,9 +1251,11 @@ func (alloc *Action) allocateResourcesForTasks(subJob *api.SubJobInfo, tasks *ut
 
 		klog.V(3).Infof("There are <%d> nodes for Job <%v/%v>", len(nodes), job.Namespace, job.Name)
 
-		// 预谓词检查：快速排除明显不满足条件的 Task（如 PDB 限制等）
-		// 如果预谓词失败，对该 Task 的所有节点都标记错误，并终止循环
-		// 因为预谓词失败意味着该 Task 在所有节点上都无法调度
+		// ── 3d. 预谓词检查（PrePredicateFn）──────────────────────────────
+		// 预谓词是轻量级的前置检查（如 PDB 限制、全局资源约束等），
+		// 用于快速排除在所有节点上都无法调度的 Task，避免后续昂贵的节点级过滤。
+		// 如果预谓词失败，对所有节点标记错误并终止循环
+		// （因为预谓词失败是全局性的，后续 Task 大概率也会失败）。
 		if err := ssn.PrePredicateFn(task); err != nil {
 			klog.V(3).Infof("PrePredicate for task %s/%s failed for: %v", task.Namespace, task.Name, err)
 			fitErrors := api.NewFitErrors()
@@ -1212,44 +1263,42 @@ func (alloc *Action) allocateResourcesForTasks(subJob *api.SubJobInfo, tasks *ut
 				fitErrors.SetNodeError(ni.Name, err)
 			}
 			job.NodesFitErrors[task.UID] = fitErrors
-			break // 预谓词失败，后续 Task 也可能失败，直接终止
+			break // 预谓词失败，终止整个分配循环
 		}
 
 		var predicateNodes []*api.NodeInfo
 		var fitErrors *api.FitErrors
 
-		// 优化：如果 Task 有提名节点（由抢占设置），优先尝试该节点
-		// 只有当提名节点属于当前 HyperNode 的叶子节点集合时才采纳
-		// 这是一种深度防御策略，防止跨域泄露
+		// ── 3e. 谓词过滤（PredicateNodes）────────────────────────────────
+		// 优化策略：如果 Task 有提名节点（由抢占动作设置），优先尝试该节点。
+		// 提名节点是抢占后预留资源的节点，直接使用可以减少不必要的重新过滤。
+		// 安全校验：提名节点必须属于当前 HyperNode 的叶子节点集合，防止跨域泄露。
 		if nominated := task.Pod.Status.NominatedNodeName; len(nominated) > 0 {
 			if _, inLeafSet := nodeNameSet[nominated]; inLeafSet {
-				// 检查提名节点的资源是否满足 Task 需求
+				// 进一步检查提名节点的资源是否满足 Task 需求
 				if nominatedNodeInfo, ok := ssn.Nodes[nominated]; ok && task.InitResreq.LessEqual(nominatedNodeInfo.FutureIdle(), api.Zero) {
 					predicateNodes, fitErrors = ph.PredicateNodes(task, []*api.NodeInfo{nominatedNodeInfo}, alloc.predicate, alloc.enablePredicateErrorCache, ssn.NodesInShard)
 				}
 			}
 		}
 
-		// 如果提名节点不可用或不满足条件，从所有节点中查找
+		// 如果提名节点不可用、不属于当前 HyperNode、或资源不满足，
+		// 回退到从所有 HyperNode 节点中进行全量谓词过滤。
 		if len(predicateNodes) == 0 {
 			predicateNodes, fitErrors = ph.PredicateNodes(task, nodes, alloc.predicate, alloc.enablePredicateErrorCache, ssn.NodesInShard)
 		}
 
+		// ── 3e-2. 谓词过滤结果为空的处理 ─────────────────────────────────
 		if len(predicateNodes) == 0 {
-			// TODO: 未来需要在这里添加 PostFilter 扩展点。例如 DRA 插件包含 PostFilter 扩展点，
-			// 但 DRA 的 PostFilter 只在极端错误条件下发生：假设一个 Pod 使用两个 claim。
-			// 在第一次调度尝试中，选了一个节点，PreBind 成功更新了第一个 claim 使其被分配并预留。
-			// 但随后更新第二个 claim 失败（例如 apiserver 宕机），调度器必须重试。
-			// 在下一次 Pod 调度尝试中，原节点因其他原因不再可用，其他节点也因为已分配的 claim 不可用。
-			// DRA 调度器插件检测到这种情况，然后在调度失败时（= 没有节点通过过滤），
-			// 通过在 PostFilter 中释放已分配的 claim 来恢复。
+			// 记录该 Task 在所有节点上的过滤失败原因
 			if fitErrors != nil && hyperNode != framework.ClusterTopHyperNode {
 				fitErrors.SetHyperNode(hyperNode)
 			}
 			job.NodesFitErrors[task.UID] = fitErrors
-			// 谓词失败的决策逻辑：
-			// - 如果作业还需要继续分配（NeedContinueAllocating=true），跳过当前 Task 继续尝试其他 Task
-			// - 否则终止分配（因为即使分配其他 Task 也无法满足最小成员数）
+
+			// 决策：是否继续尝试后续 Task
+			// - NeedContinueAllocating=true：作业还需要更多 Task，跳过当前 Task 继续
+			// - NeedContinueAllocating=false：即使分配其他 Task 也无法满足 minAvailable，提前终止
 			if job.NeedContinueAllocating(subJob.UID) {
 				continue
 			} else {
@@ -1257,51 +1306,67 @@ func (alloc *Action) allocateResourcesForTasks(subJob *api.SubJobInfo, tasks *ut
 			}
 		}
 
-		// 如果 SubJob 有网络拓扑需求，记录当前已分配的 HyperNode
+		// ── 3f. 网络拓扑记录 ─────────────────────────────────────────────
+		// 如果 SubJob 有网络拓扑需求（如 NCCL 分布式训练需要低延迟互联），
+		// 记录当前 Task 被分配到的 HyperNode，用于后续拓扑域收敛计算。
 		if subJob.WithNetworkTopology() {
 			task.JobAllocatedHyperNode = allocatedHyperNode
 		}
 
-		// 从通过谓词的节点中选择最优节点
+		// ── 3g. 节点打分与选择 ───────────────────────────────────────────
+		// 从通过谓词过滤的节点中，按资源梯度（本分片空闲 > 其他分片空闲 >
+		// 本分片未来空闲 > 其他分片未来空闲）和打分函数选出最优节点。
 		bestNode, _ := alloc.prioritizeNodes(ssn, task, predicateNodes)
 		if bestNode == nil {
 			continue
 		}
 
-		// 将 Task 分配到最优节点
+		// ── 3h. 执行资源分配 ─────────────────────────────────────────────
+		// 根据节点资源情况，选择直接分配（Allocate）或流水线分配（Pipeline）：
+		// - 节点 Idle 满足需求 → Allocate（Task 立即绑定到节点）
+		// - 节点 FutureIdle 满足需求 → Pipeline（等待资源释放后再绑定）
 		if err := alloc.allocateResourcesForTask(stmt, task, bestNode, job); err != nil {
 			klog.ErrorS(err, "Allocate resources for task fail", "task", task.Name)
 			continue
 		}
 
-		// 如果 SubJob 有网络拓扑需求，更新已分配 HyperNode
-		// 取当前最优节点所在的 HyperNode 与已分配 HyperNode 的最近公共祖先
+		// ── 3i. 更新已分配 HyperNode（网络拓扑场景）──────────────────────
+		// 取当前最优节点所在的 HyperNode 与已分配 HyperNode 的最近公共祖先（LCA），
+		// 使得 allocatedHyperNode 始终是所有已分配 Task 的最紧拓扑域。
+		// 例如：Task1 在机架A，Task2 在机架B → LCA 为交换机S（覆盖 A 和 B）。
 		if subJob.WithNetworkTopology() {
 			allocatedHyperNode = getNewAllocatedHyperNode(ssn, bestNode.Name, allocatedHyperNode)
 		}
 
-		// SubJob 已就绪，提前结束（不需要继续分配更多 Task）
+		// ── 3j. 提前结束检查 ─────────────────────────────────────────────
+		// 如果 SubJob 已就绪（已分配的 Task 数 >= minAvailable），
+		// 无需继续分配更多 Task，提前结束循环。
 		if ssn.SubJobReady(job, subJob) {
 			break
 		}
 	}
 
-	// 检查分配结果
+	// ── 步骤 4：最终判定 ─────────────────────────────────────────────────
 	if ssn.SubJobReady(job, subJob) {
-		// SubJob 已就绪：足够多的 Task 已被分配到节点上
+		// SubJob 已就绪：足够多的 Task 已被分配到节点上，满足 minAvailable 要求。
+		// 返回 Statement，由调用方统一 Commit 提交到 apiserver。
 		klog.V(3).InfoS("SubJob ready, return statement", "job", job.UID, "subJob", subJob.UID)
-		// 软性拓扑模式下，更新子作业的已分配 HyperNode
+		// 软性拓扑模式下，将计算得到的 allocatedHyperNode 回写到 SubJob，
+		// 供后续调度周期参考（确保后续 Task 尽量分配到同一拓扑域）。
 		if subJob.IsSoftTopologyMode() {
 			subJob.AllocatedHyperNode = allocatedHyperNode
 		}
 		return stmt
 	} else if ssn.SubJobPipelined(job, subJob) {
-		// SubJob 已流水线化：分配到了即将释放资源的节点上（Pipeline 模式）
+		// SubJob 已流水线化：虽然节点资源不足无法立即绑定，
+		// 但 Task 已被 Pipeline 到即将释放资源的节点上。
+		// 返回 Statement，等待资源释放后由后续调度周期处理。
 		klog.V(3).InfoS("SubJob pipelined, return statement", "job", job.UID, "subJob", subJob.UID)
 		return stmt
 	}
 
-	// SubJob 既未就绪也未流水线化，分配失败，丢弃所有操作
+	// SubJob 既未就绪也未流水线化，说明本次分配无法满足 minAvailable 要求。
+	// 丢弃所有操作（回滚 Session 内存状态），返回 nil 让调用方重试或跳过。
 	stmt.Discard()
 	return nil
 }

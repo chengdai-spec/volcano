@@ -493,9 +493,9 @@ func (ji *JobInfo) UnsetPodGroup() {
 // SetPodGroup 设置作业的 PodGroup 信息
 // 这是从 PodGroup CRD 同步信息到 JobInfo 的核心方法，会提取并设置：
 // 1. 作业名称、命名空间、最小成员数、队列
-// 2. SLA 等待时间（从注解解析）
+// 2. SLA 等待时间(从注解解析)
 // 3. 抢占属性、可撤销区域、中断预算
-// 4. 各角色的最小成员信息（TaskMinAvailable）
+// 4. 各角色的最小成员信息(TaskMinAvailable)
 // 5. 如果 SubGroupPolicy 变化，重新构建子作业关系
 func (ji *JobInfo) SetPodGroup(pg *PodGroup) {
 	ji.Name = pg.Name
@@ -1117,7 +1117,7 @@ func (ji *JobInfo) getJobAllocatedRoles() map[string]int32 {
 
 // CheckTaskValid 检查作业中各角色的任务数量是否有效
 // 当 MinAvailable >= TaskMinAvailableTotal 时才进行检查
-// 如果某角色的实际任务数（包含 Allocated/Succeeded/Pipelined/Pending 状态）小于其 minAvailable，返回 false
+// 如果某角色的实际任务数(包含 Allocated/Succeeded/Pipelined/Pending 状态)小于其 minAvailable，返回 false
 func (ji *JobInfo) CheckTaskValid() bool {
 	// 如果 MinAvailable 小于各角色最小成员数之和，跳过此检查
 	if ji.MinAvailable < ji.TaskMinAvailableTotal {
