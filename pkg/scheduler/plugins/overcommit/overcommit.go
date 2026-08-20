@@ -198,7 +198,7 @@ func (op *overcommitPlugin) OnSessionOpen(ssn *framework.Session) {
 		return util.Reject
 	})
 
-	// 【第五步】注册 JobEnqueuedFn 扩展点
+	// 注册 JobEnqueuedFn 扩展点
 	// 该函数在 Job 成功入队后被调用，用于更新 inqueueResource 统计
 	// 这样后续 Job 的入队判断就能感知到本次入队带来的资源变化
 	ssn.AddJobEnqueuedFn(op.Name(), func(obj interface{}) {

@@ -242,8 +242,8 @@ type jobcontroller struct {
 	// recorder 用于向 Kubernetes Event 系统记录事件。
 	recorder record.EventRecorder
 
-	// errTasks 是错误任务重同步队列。
-	// 当某些 Pod 删除失败、处理失败时，可能会加入该队列后续重试。
+	// errTasks 是错误任务重同步队列
+	// 当某些 Pod 删除失败、处理失败时，可能会加入该队列后续重试
 	errTasks workqueue.TypedRateLimitingInterface[any]
 
 	// workers 表示 worker 数量。

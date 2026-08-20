@@ -46,10 +46,10 @@ import (
 // 因为 syncJob 中会并发创建 Pod，并发统计 Pod 状态时 map 写入不是线程安全的，所以需要加锁。
 var calMutex sync.Mutex
 
-// getPodGroupByJob 根据 Job 获取对应的 PodGroup。
-// 新版本 PodGroup 名称格式为：job.Name-job.UID。
-// 老版本 PodGroup 名称格式为：job.Name。
-// 所以这里先查新格式，如果不存在，再查老格式，以兼容历史版本。
+// getPodGroupByJob 根据 Job 获取对应的 PodGroup
+// 新版本 PodGroup 名称格式为：job.Name-job.UID
+// 老版本 PodGroup 名称格式为：job.Name
+// 所以这里先查新格式，如果不存在，再查老格式，以兼容历史版本
 func (cc *jobcontroller) getPodGroupByJob(job *batch.Job) (*scheduling.PodGroup, error) {
 	pgName := cc.generateRelatedPodGroupName(job)
 	pg, err := cc.pgLister.PodGroups(job.Namespace).Get(pgName)
@@ -66,17 +66,17 @@ func (cc *jobcontroller) getPodGroupByJob(job *batch.Job) (*scheduling.PodGroup,
 	return nil, err
 }
 
-// generateRelatedPodGroupName 生成 Job 对应的 PodGroup 名称。
-// 使用 UID 是为了避免同名 Job 删除后重建时，新的 Job 复用旧 PodGroup。
+// generateRelatedPodGroupName 生成 Job 对应的 PodGroup 名称
+// 使用 UID 是为了避免同名 Job 删除后重建时，新的 Job 复用旧 PodGroup
 func (cc *jobcontroller) generateRelatedPodGroupName(job *batch.Job) string {
 	return fmt.Sprintf("%s-%s", job.Name, string(job.UID))
 }
 
-// killTarget 用于删除指定目标。
+// killTarget 用于删除指定目标
 // target 可以是：
 // 1. 某个 Task；
 // 2. 某个 Pod；
-// 3. 某个 Partition。
+// 3. 某个 Partition
 func (cc *jobcontroller) killTarget(jobInfo *apis.JobInfo, target state.Target, updateStatus state.UpdateStatusFn) error {
 	switch target.Type {
 	case state.TargetTypeTask:
@@ -192,7 +192,7 @@ func (cc *jobcontroller) killPods(jobInfo *apis.JobInfo, podRetainPhase state.Ph
 		}
 	}
 
-	// 删除 Pod 前，先将 Pod 标记为 out-of-sync。
+	// 删除 Pod 前，先将 Pod 标记为 out-of-sync
 	// 这样可以避免 controller 误把这些旧 Pod 当作当前有效 Pod。
 	for podName, pod := range podsToKill {
 		_, err := cc.kubeClient.CoreV1().Pods(pod.Namespace).Patch(context.TODO(), pod.Name, types.JSONPatchType, jobhelpers.OutOfSyncJSONPatch(), metav1.PatchOptions{})
@@ -250,7 +250,7 @@ func (cc *jobcontroller) killPods(jobInfo *apis.JobInfo, podRetainPhase state.Ph
 	klog.V(3).Infof("Running duration is %s", runningDuration.ToUnstructured())
 	job.Status.RunningDuration = &runningDuration
 
-	// pluginOnJobDelete 必须在更新 Job Status 之前执行。
+	// pluginOnJobDelete 必须在更新 Job Status 之前执行
 	if err := cc.pluginOnJobDelete(job); err != nil {
 		return err
 	}
@@ -269,7 +269,7 @@ func (cc *jobcontroller) killPods(jobInfo *apis.JobInfo, podRetainPhase state.Ph
 		return e
 	}
 
-	// 删除 Job 对应的 PodGroup。
+	// 删除 Job 对应的 PodGroup
 	pg, err := cc.getPodGroupByJob(job)
 	if err != nil && !apierrors.IsNotFound(err) {
 		klog.Errorf("Failed to find PodGroup of Job: %s/%s, error: %s", job.Namespace, job.Name, err.Error())
@@ -284,12 +284,12 @@ func (cc *jobcontroller) killPods(jobInfo *apis.JobInfo, podRetainPhase state.Ph
 		}
 	}
 
-	// 注意：这里不删除 input/output，等 Job 真正被删除时再处理。
+	// 注意：这里不删除 input/output，等 Job 真正被删除时再处理
 	return nil
 }
 
-// initiateJob 初始化 Job。
-// 包括初始化状态、执行插件、创建 PVC、创建或更新 PodGroup。
+// initiateJob 初始化 Job
+// 包括初始化状态、执行插件、创建 PVC、创建或更新 PodGroup
 func (cc *jobcontroller) initiateJob(job *batch.Job) (*batch.Job, error) {
 	klog.V(3).Infof("Starting to initiate Job <%s/%s>", job.Namespace, job.Name)
 	jobInstance, err := cc.initJobStatus(job)
@@ -313,8 +313,8 @@ func (cc *jobcontroller) initiateJob(job *batch.Job) (*batch.Job, error) {
 	return newJob, nil
 }
 
-// initOnJobUpdate 在 Job 更新时执行。
-// 与首次初始化不同，这里主要执行插件更新逻辑和 PodGroup 同步。
+// initOnJobUpdate 在 Job 更新时执行
+// 与首次初始化不同，这里主要执行插件更新逻辑和 PodGroup 同步
 func (cc *jobcontroller) initOnJobUpdate(job *batch.Job) error {
 	klog.V(3).Infof("Starting to initiate Job <%s/%s> on update", job.Namespace, job.Name)
 	if err := cc.pluginOnJobUpdate(job); err != nil {
@@ -339,6 +339,24 @@ func (cc *jobcontroller) GetQueueInfo(queue string) (*scheduling.Queue, error) {
 
 // syncJob 是 Job Controller 的核心同步函数。
 // 它负责初始化 Job、创建 PodGroup、等待 PodGroup 调度条件、创建 Pod、删除多余 Pod、统计状态、更新 Job Status。
+/*
+syncJob
+ ├── 1. 检查 Job 是否在删除中（DeletionTimestamp）
+ ├── 2. 获取 Queue 信息，处理跨集群转发
+ ├── 3. 判断是否需要初始化
+ │    ├── 首次 → initiateJob（初始化状态 + 插件 + PVC + PodGroup）
+ │    └── 非首次 → initOnJobUpdate（更新插件 + 同步 PodGroup）
+ ├── 4. 检查 PodGroup 状态
+ │    └── 只有 PG 不是 Pending 时，才开始创建 Pod（Gang Scheduling 的关键）
+ ├── 5. 遍历每个 Task，计算需要创建/删除的 Pod
+ │    ├── 缺少的 Pod → 加入 podToCreate
+ │    ├── 多余的 Pod → 加入 podToDelete（缩容场景）
+ │    └── 已有 Pod → 统计状态
+ ├── 6. 并发创建 Pod（检查 DependsOn 依赖）
+ ├── 7. 并发删除多余 Pod
+ ├── 8. 汇总状态，更新 Job Status
+ └── 9. 更新 Controller 缓存
+*/
 func (cc *jobcontroller) syncJob(jobInfo *apis.JobInfo, updateStatus state.UpdateStatusFn) error {
 	job := jobInfo.Job
 	klog.V(3).Infof("Starting to sync up Job <%s/%s>, current version %d", job.Namespace, job.Name, job.Status.Version)
@@ -349,7 +367,7 @@ func (cc *jobcontroller) syncJob(jobInfo *apis.JobInfo, updateStatus state.Updat
 		return nil
 	}
 
-	// 深拷贝，避免直接修改 informer cache 中的对象。
+	// 深拷贝，避免直接修改 informer cache 中的对象
 	job = job.DeepCopy()
 
 	queueInfo, err := cc.GetQueueInfo(job.Spec.Queue)
@@ -357,7 +375,7 @@ func (cc *jobcontroller) syncJob(jobInfo *apis.JobInfo, updateStatus state.Updat
 		return err
 	}
 
-	// 如果 Queue 配置了 ExtendClusters，说明该 Job 需要跨集群转发。
+	// 如果 Queue 配置了 ExtendClusters，说明该 Job 需要跨集群转发
 	var jobForwarding bool
 	if len(queueInfo.Spec.ExtendClusters) != 0 {
 		jobForwarding = true
@@ -769,9 +787,9 @@ func (cc *jobcontroller) createPVC(job *batch.Job, vcName string, volumeClaim *v
 	return nil
 }
 
-// createOrUpdatePodGroup 创建或更新 Job 对应的 PodGroup。
-// PodGroup 是 Volcano gang scheduling 的核心资源。
-// 它描述了该 Job 至少需要多少 Pod、多少资源才能整体调度。
+// createOrUpdatePodGroup 创建或更新 Job 对应的 PodGroup
+// PodGroup 是 Volcano gang scheduling 的核心资源
+// 它描述了该 Job 至少需要多少 Pod、多少资源才能整体调度
 func (cc *jobcontroller) createOrUpdatePodGroup(job *batch.Job) error {
 	pg, err := cc.getPodGroupByJob(job)
 	if err != nil {
@@ -909,10 +927,10 @@ func (cc *jobcontroller) deleteJobPod(jobName string, pod *v1.Pod) error {
 	return nil
 }
 
-// calcPGMinResources 计算 PodGroup 的最小资源需求。
-// 这里会考虑 Task 优先级和 MinAvailable。
-// 如果 job.MinAvailable 小于所有 task.MinAvailable 之和，则只计算前 job.MinAvailable 个 Pod 的资源。
-// 否则计算满足所有 task 最小需求时的资源。
+// calcPGMinResources 计算 PodGroup 的最小资源需求
+// 这里会考虑 Task 优先级和 MinAvailable
+// 如果 job.MinAvailable 小于所有 task.MinAvailable 之和，则只计算前 job.MinAvailable 个 Pod 的资源
+// 否则计算满足所有 task 最小需求时的资源
 func (cc *jobcontroller) calcPGMinResources(job *batch.Job) *v1.ResourceList {
 	var tasksPriority TasksPriority
 	totalMinAvailable := int32(0)
@@ -1057,46 +1075,95 @@ func newCondition(status batch.JobPhase, lastTransitionTime *metav1.Time) batch.
 	}
 }
 
-// setPgSubGroupPolicy 根据 Task 的 PartitionPolicy 初始化 PodGroup 的 SubGroupPolicy
-// SubGroupPolicy 用于描述分区调度策略
+// setPgSubGroupPolicy 根据 Task 的 PartitionPolicy 初始化 PodGroup 的 SubGroupPolicy。
+//
+// SubGroupPolicy 是 Volcano 分区调度的核心配置，它告诉调度器：
+//   - 一个 Task 下的 Pod 应该分成几组（SubGroup）
+//   - 每组包含多少个 Pod
+//   - 至少要有几组满足条件才能触发调度
+//
+// 只有配置了 PartitionPolicy 的 Task 才会生成对应的 SubGroupPolicy，
+// 没有 PartitionPolicy 的 Task 会被直接跳过。
+//
+// 参数：
+//   - pg: 待设置的 PodGroup 对象（会被直接修改）
+//   - tasks: Job 中定义的所有 TaskSpec 列表
+//
+// 执行流程：
+//  1. 初始化 SubGroupPolicy 为空切片（确保不是 nil，方便后续 append）
+//  2. 遍历所有 Task，过滤掉没有 PartitionPolicy 的 Task
+//  3. 对每个有 PartitionPolicy 的 Task，调用 getSubGroupPolicy 生成 SubGroupPolicy
+//  4. 将生成的 SubGroupPolicy 追加到 pg.Spec.SubGroupPolicy
 func setPgSubGroupPolicy(pg *scheduling.PodGroup, tasks []batch.TaskSpec) {
+	// 步骤 1：初始化 SubGroupPolicy 为空切片，避免 nil 切片导致后续 append 异常
 	pg.Spec.SubGroupPolicy = make([]scheduling.SubGroupPolicySpec, 0)
+
+	// 步骤 2：遍历所有 Task，只处理配置了 PartitionPolicy 的 Task
 	for _, taskSpec := range tasks {
 		if taskSpec.PartitionPolicy == nil {
+			// 该 Task 没有分区策略，跳过
 			continue
 		}
+
+		// 步骤 3：根据 TaskSpec 生成对应的 SubGroupPolicy
 		subGroupPolicy := getSubGroupPolicy(taskSpec)
+
+		// 步骤 4：追加到 PodGroup 的 SubGroupPolicy 列表
 		pg.Spec.SubGroupPolicy = append(pg.Spec.SubGroupPolicy, subGroupPolicy)
 	}
 }
 
-// updatePgSubGroupPolicy 更新 PodGroup 的 SubGroupPolicy
-// 如果新旧 SubGroupPolicy 不一致，则返回 true，表示需要更新 PodGroup
+// updatePgSubGroupPolicy 更新已有 PodGroup 的 SubGroupPolicy。
+//
+// 当 Job 被更新（例如修改了 PartitionPolicy）时，需要同步更新 PodGroup 上的 SubGroupPolicy。
+// 该函数通过对比新旧 SubGroupPolicy 来判断是否需要更新，避免无意义的 API 调用。
+//
+// 参数：
+//   - pg: 已有的 PodGroup 对象（如果需要更新，会被直接修改）
+//   - tasks: Job 中最新的 TaskSpec 列表
+//
+// 返回值：
+//   - bool: true 表示 SubGroupPolicy 发生了变化，需要更新 PodGroup；false 表示无变化
+//
+// 执行流程：
+//  1. 将已有 PodGroup 的 SubGroupPolicy 转为 map（以 Name 为 key），方便快速查找
+//  2. 遍历最新 Task 列表，构建新的 SubGroupPolicy 列表
+//  3. 对比新旧 SubGroupPolicy，检测是否有变化
+//  4. 如果有变化，用新列表替换 pg.Spec.SubGroupPolicy
 func updatePgSubGroupPolicy(pg *scheduling.PodGroup, tasks []batch.TaskSpec) bool {
 	subGroupPolicyShouldUpdate := false
 
+	// 步骤 1：将已有 SubGroupPolicy 转为 map，key 为 Name（即 Task 名称）
+	// 这样可以通过 Task 名称快速找到对应的旧 SubGroupPolicy
 	oldSubGroupPolicyMap := make(map[string]scheduling.SubGroupPolicySpec)
 	for _, subGroupPolicy := range pg.Spec.SubGroupPolicy {
 		oldSubGroupPolicyMap[subGroupPolicy.Name] = subGroupPolicy
 	}
 
+	// 步骤 2：遍历最新 Task 列表，构建新的 SubGroupPolicy 列表
 	newSubGroupPolicyList := make([]scheduling.SubGroupPolicySpec, 0)
 	for _, taskSpec := range tasks {
 		if taskSpec.PartitionPolicy == nil {
+			// 该 Task 没有 PartitionPolicy，不应该产生 SubGroupPolicy
 			if _, ok := oldSubGroupPolicyMap[taskSpec.Name]; ok {
+				// 但旧的 PodGroup 中存在该 Task 的 SubGroupPolicy，说明被删除了，需要更新
 				subGroupPolicyShouldUpdate = true
 			}
 			continue
 		}
 
+		// 根据最新 TaskSpec 生成 SubGroupPolicy
 		newSubGroupPolicy := getSubGroupPolicy(taskSpec)
 		newSubGroupPolicyList = append(newSubGroupPolicyList, newSubGroupPolicy)
 
+		// 步骤 3：对比新旧 SubGroupPolicy 是否一致
+		// 使用 Semantic.DeepEqual 进行深度比较，包括指针指向的值
 		if !equality.Semantic.DeepEqual(newSubGroupPolicy, oldSubGroupPolicyMap[taskSpec.Name]) {
 			subGroupPolicyShouldUpdate = true
 		}
 	}
 
+	// 步骤 4：如果有变化，用新列表替换 pg 的 SubGroupPolicy
 	if subGroupPolicyShouldUpdate {
 		pg.Spec.SubGroupPolicy = newSubGroupPolicyList
 	}
@@ -1104,36 +1171,56 @@ func updatePgSubGroupPolicy(pg *scheduling.PodGroup, tasks []batch.TaskSpec) boo
 	return subGroupPolicyShouldUpdate
 }
 
-// getSubGroupPolicy 根据 TaskSpec 生成 SubGroupPolicy。
-// 主要包括：
-// 1. SubGroup 名称；
-// 2. 分组大小；
-// 3. 最小分组数；
-// 4. LabelSelector；
-// 5. MatchLabelKeys；
-// 6. NetworkTopology。
+// getSubGroupPolicy 根据 TaskSpec 生成一个 SubGroupPolicySpec。
+//
+// 该函数是 TaskSpec.PartitionPolicy → SubGroupPolicySpec 的字段映射器，
+// 将 Job 层面的分区配置翻译为 PodGroup 层面调度器能理解的格式。
+//
+// 字段映射关系：
+//
+//	TaskSpec.Name                        → SubGroupPolicySpec.Name（SubGroup 名称）
+//	PartitionPolicy.PartitionSize         → SubGroupPolicySpec.SubGroupSize（每组 Pod 数量）
+//	PartitionPolicy.MinPartitions         → SubGroupPolicySpec.MinSubGroups（最少分组数，低于此数不调度）
+//	TaskSpec.Name（作为 label 值）         → SubGroupPolicySpec.LabelSelector（通过 "volcano.sh/task-spec" 标签匹配 Pod）
+//	固定值 "volcano.sh/partition-id"      → SubGroupPolicySpec.MatchLabelKeys（按分区 ID 标签进行二次分组）
+//	PartitionPolicy.NetworkTopology       → SubGroupPolicySpec.NetworkTopology（网络拓扑约束，透传）
+//
+// 参数：
+//   - taskSpec: 配置了 PartitionPolicy 的 TaskSpec
+//
+// 返回值：
+//   - SubGroupPolicySpec: 生成的 SubGroup 策略配置
 func getSubGroupPolicy(taskSpec batch.TaskSpec) scheduling.SubGroupPolicySpec {
+	// 步骤 1：设置基础字段——名称、分组大小、最小分组数
 	subGroupPolicy := scheduling.SubGroupPolicySpec{
-		Name:         taskSpec.Name,
-		SubGroupSize: &taskSpec.PartitionPolicy.PartitionSize,
-		MinSubGroups: &taskSpec.PartitionPolicy.MinPartitions,
+		Name:         taskSpec.Name,                                    // SubGroup 名称与 Task 名称一一对应
+		SubGroupSize: &taskSpec.PartitionPolicy.PartitionSize,           // 每个 SubGroup 包含的 Pod 数量
+		MinSubGroups: &taskSpec.PartitionPolicy.MinPartitions,           // 至少需要多少个 SubGroup 才能触发调度
 	}
 
+	// 步骤 2：设置 LabelSelector，用于匹配属于该 Task 的 Pod
+	// 通过 "volcano.sh/task-spec" 标签筛选出属于当前 Task 的所有 Pod
 	if taskSpec.PartitionPolicy != nil {
 		subGroupPolicy.LabelSelector = &metav1.LabelSelector{
 			MatchLabels: map[string]string{
-				batch.TaskSpecKey: taskSpec.Name,
+				batch.TaskSpecKey: taskSpec.Name, // 例如 "volcano.sh/task-spec": "trainer"
 			},
 		}
 	}
 
+	// 步骤 3：设置 MatchLabelKeys，用于在 LabelSelector 匹配的基础上进一步细分组
+	// 调度器会根据 Pod 上 "volcano.sh/partition-id" 标签的值，
+	// 将值相同的 Pod 归入同一个分区，同一分区内的 Pod 遵循统一的网络拓扑策略
 	subGroupPolicy.MatchLabelKeys = []string{batch.TaskPartitionID}
 
+	// 步骤 4：如果配置了网络拓扑约束，透传到 SubGroupPolicy
+	// 网络拓扑用于确保同一个 SubGroup 内的 Pod 被调度到满足网络要求的拓扑域内
+	// （例如同一交换机下、同一机架内等）
 	if taskSpec.PartitionPolicy.NetworkTopology != nil {
 		nt := &scheduling.NetworkTopologySpec{
-			Mode:               scheduling.NetworkTopologyMode(taskSpec.PartitionPolicy.NetworkTopology.Mode),
-			HighestTierAllowed: taskSpec.PartitionPolicy.NetworkTopology.HighestTierAllowed,
-			HighestTierName:    taskSpec.PartitionPolicy.NetworkTopology.HighestTierName,
+			Mode:               scheduling.NetworkTopologyMode(taskSpec.PartitionPolicy.NetworkTopology.Mode),               // 拓扑模式
+			HighestTierAllowed: taskSpec.PartitionPolicy.NetworkTopology.HighestTierAllowed, // 允许的最高拓扑层级
+			HighestTierName:    taskSpec.PartitionPolicy.NetworkTopology.HighestTierName,    // 最高拓扑层名称
 		}
 		subGroupPolicy.NetworkTopology = nt
 	}

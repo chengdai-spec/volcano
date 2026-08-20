@@ -275,8 +275,8 @@ func createJobPod(job *batch.Job, template *v1.PodTemplateSpec, ix int, jobForwa
 //   - 先匹配 Event（事件类型）或 AnyEvent（通配）；
 //   - 再匹配 ExitCode（容器退出码）；
 //   - 对于 PodPendingEvent，需要检查是否配置了 Timeout：
-//     - 有 Timeout：设置 delay，延迟执行；
-//     - 无 Timeout：跳过该策略，继续匹配下一条（相当于“不处理”）。
+//   - 有 Timeout：设置 delay，延迟执行；
+//   - 无 Timeout：跳过该策略，继续匹配下一条（相当于“不处理”）。
 func applyPolicies(job *batch.Job, req *apis.Request) (delayAct *delayAction) {
 	// 步骤 1：初始化 delayAction，默认动作为 SyncJobAction。
 	//
@@ -479,12 +479,12 @@ type TaskPriority struct {
 // TasksPriority 是 TaskPriority 的切片，实现了 sort.Interface 接口。
 type TasksPriority []TaskPriority
 
-// Len 返回 Task 数量，实现 sort.Interface。
+// Len 返回 Task 数量，实现 sort.Interface
 func (p TasksPriority) Len() int { return len(p) }
 
-// Less 比较两个 Task 的优先级，优先级高的排在前面（降序）。
+// Less 比较两个 Task 的优先级，优先级高的排在前面（降序）
 //
-// 注意：这里是 p[i].priority > p[j].priority，即优先级数值越大越靠前。
+// 注意：这里是 p[i].priority > p[j].priority，即优先级数值越大越靠前
 func (p TasksPriority) Less(i, j int) bool {
 	return p[i].priority > p[j].priority
 }
@@ -492,10 +492,10 @@ func (p TasksPriority) Less(i, j int) bool {
 // Swap 交换两个 Task 的位置，实现 sort.Interface。
 func (p TasksPriority) Swap(i, j int) { p[i], p[j] = p[j], p[i] }
 
-// isControlledBy 判断一个 Kubernetes 对象是否被指定 GVK 的资源控制。
+// isControlledBy 判断一个 Kubernetes 对象是否被指定 GVK 的资源控制
 //
-// 通过检查 OwnerReferences 中的 ControllerRef 来判断。
-// 用于确认某个资源（如 Pod）是否属于某个 Volcano Job。
+// 通过检查 OwnerReferences 中的 ControllerRef 来判断
+// 用于确认某个资源（如 Pod）是否属于某个 Volcano Job
 func isControlledBy(obj metav1.Object, gvk schema.GroupVersionKind) bool {
 	controllerRef := metav1.GetControllerOf(obj)
 	if controllerRef == nil {
@@ -507,22 +507,22 @@ func isControlledBy(obj metav1.Object, gvk schema.GroupVersionKind) bool {
 	return false
 }
 
-// CalcFirstCountResources 计算前 count 个 Pod 所需的资源总量。
+// CalcFirstCountResources 计算前 count 个 Pod 所需的资源总量
 //
-// 按优先级从高到低遍历 Task，累计计算前 count 个 Pod 的资源请求。
-// 用于在 PodGroup 最小资源计算中，优先保障高优先级任务的资源。
+// 按优先级从高到低遍历 Task，累计计算前 count 个 Pod 的资源请求
+// 用于在 PodGroup 最小资源计算中，优先保障高优先级任务的资源
 //
 // 计算逻辑：
-//  1. 按优先级降序排序；
-//  2. 遍历 Task，如果当前 Task 的副本数 >= 剩余 count，则只取 count 个副本的资源，然后结束；
-//  3. 如果副本数 < 剩余 count，则取全部副本的资源，继续下一个 Task。
+//  1. 按优先级降序排序
+//  2. 遍历 Task，如果当前 Task 的副本数 >= 剩余 count，则只取 count 个副本的资源，然后结束
+//  3. 如果副本数 < 剩余 count，则取全部副本的资源，继续下一个 Task
 func (p TasksPriority) CalcFirstCountResources(count int32) v1.ResourceList {
 	sort.Sort(p)
 	minReq := v1.ResourceList{}
 
 	for _, task := range p {
 		if count <= task.Replicas {
-			// 当前 Task 的副本数足够满足剩余 count，只取 count 个副本的资源。
+			// 当前 Task 的副本数足够满足剩余 count，只取 count 个副本的资源
 			minReq = quotav1.Add(minReq, util.CalTaskRequests(&v1.Pod{Spec: task.Template.Spec}, count))
 			break
 		} else {
@@ -534,15 +534,15 @@ func (p TasksPriority) CalcFirstCountResources(count int32) v1.ResourceList {
 	return minReq
 }
 
-// CalcPGMinResources 计算 PodGroup 的最小资源需求。
+// CalcPGMinResources 计算 PodGroup 的最小资源需求
 //
 // PodGroup 是 Volcano gang scheduling 的核心资源，
-// 调度器需要知道 PodGroup 至少需要多少资源才能做出调度决策。
+// 调度器需要知道 PodGroup 至少需要多少资源才能做出调度决策
 //
 // 计算逻辑：
-//  1. 按优先级降序排序 Task；
-//  2. 第一轮：累加每个 Task 的 MinAvailable 个副本的资源，直到达到 jobMinAvailable；
-//  3. 第二轮：如果第一轮未达到 jobMinAvailable，则用 Task 的剩余副本（Replicas - MinAvailable）填充。
+//  1. 按优先级降序排序 Task
+//  2. 第一轮：累加每个 Task 的 MinAvailable 个副本的资源，直到达到 jobMinAvailable
+//  3. 第二轮：如果第一轮未达到 jobMinAvailable，则用 Task 的剩余副本(Replicas - MinAvailable)填充
 //
 // 为什么要分两轮：
 //
@@ -590,7 +590,7 @@ func (p TasksPriority) CalcPGMinResources(jobMinAvailable int32) v1.ResourceList
 		left := task.Replicas
 		if task.MinAvailable != nil {
 			if *task.MinAvailable == task.Replicas {
-				// MinAvailable == Replicas，没有剩余副本可用。
+				// MinAvailable == Replicas，没有剩余副本可用
 				continue
 			} else {
 				left = task.Replicas - *task.MinAvailable

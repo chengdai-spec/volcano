@@ -36,7 +36,7 @@ func GetPodQuotaUsage(pod *v1.Pod) v1.ResourceList {
 	return res
 }
 
-// calTaskRequests returns requests resource with validReplica replicas
+// CalTaskRequests returns requests resource with validReplica replicas
 func CalTaskRequests(pod *v1.Pod, validReplica int32) v1.ResourceList {
 	minReq := v1.ResourceList{}
 	usage := GetPodQuotaUsage(pod)
