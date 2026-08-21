@@ -50,9 +50,9 @@ const (
 // 每个 operation 会被追加到 Statement 的 operations 切片中，
 // 在 Commit 时执行实际操作，在 Discard 时执行回滚操作。
 type operation struct {
-	name   Operation   // 操作类型：Evict / Pipeline / Allocate
+	name   Operation     // 操作类型：Evict / Pipeline / Allocate
 	task   *api.TaskInfo // 被操作的 Task 信息
-	reason string      // 驱逐原因（仅 Evict 操作时使用）
+	reason string        // 驱逐原因（仅 Evict 操作时使用）
 }
 
 // Statement 是调度会话（Session）中的事务性操作容器。
@@ -103,7 +103,7 @@ func (s *Statement) Evict(reclaimee *api.TaskInfo, reason string) {
 		node.UpdateTask(reclaimee)
 	}
 
-	// 第三步：触发所有 EventHandler 的 DeallocateFunc，通知插件（如 drf、proportion）
+	// 第三步：触发所有 EventHandler 的 DeallocateFunc，通知插件(如 drf/proportion)
 	// 该 Task 正在释放资源，插件需要相应地减少已分配资源统计
 	for _, eh := range s.ssn.eventHandlers {
 		if eh.DeallocateFunc != nil {
@@ -122,7 +122,7 @@ func (s *Statement) Evict(reclaimee *api.TaskInfo, reason string) {
 	})
 }
 
-// evict 执行真正的驱逐操作（小写开头，仅在 Commit 时调用）。
+// evict 执行真正的驱逐操作(小写开头，仅在 Commit 时调用)
 // 通过 cache 向 apiserver 发送驱逐 Pod 的请求。
 // 如果驱逐失败，会立即调用 unevict 回滚 Session 内存状态，保证一致性。
 //
@@ -142,10 +142,10 @@ func (s *Statement) evict(reclaimee *api.TaskInfo, reason string) error {
 	return nil
 }
 
-// unevict 是 Evict 的回滚方法（小写开头，仅在内部使用）。
-// 将 Task 状态恢复为 Running，并触发 AllocateFunc 回调，
-// 通知各插件该 Task 仍然占用资源。
-// 典型调用场景：Commit 时驱逐失败，或 Discard 时回滚驱逐操作。
+// unevict 是 Evict 的回滚方法(小写开头，仅在内部使用)
+// 将 Task 状态恢复为 Running，并触发 AllocateFunc 回调
+// 通知各插件该 Task 仍然占用资源
+// 典型调用场景：Commit 时驱逐失败，或 Discard 时回滚驱逐操作
 //
 // 执行步骤：
 //  1. 将 Task 状态恢复为 Running
