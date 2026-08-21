@@ -204,22 +204,25 @@ func New(arguments framework.Arguments) framework.Plugin {
 	return &PredicatesPlugin{pluginArguments: arguments, enabledPredicates: predicate, features: features}
 }
 
+// Name 返回 predicates 插件的名称，用于在调度框架中标识此插件。
 func (pp *PredicatesPlugin) Name() string {
 	return PluginName
 }
 
 // predicateEnable 记录各谓词插件的启用状态。
+// predicateEnable 记录各过滤插件的启用/禁用状态。
+// 通过调度器 configmap 中的参数控制，默认大部分启用。
 type predicateEnable struct {
-	nodeAffinityEnable              bool
-	nodePortEnable                  bool
-	taintTolerationEnable           bool
-	podAffinityEnable               bool
-	nodeVolumeLimitsEnable          bool
-	volumeZoneEnable                bool
-	podTopologySpreadEnable         bool
-	cacheEnable                     bool
-	volumeBindingEnable             bool
-	dynamicResourceAllocationEnable bool
+	nodeAffinityEnable              bool // 节点亲和性
+	nodePortEnable                  bool // 节点端口冲突检测
+	taintTolerationEnable           bool // 污点容忍
+	podAffinityEnable               bool // Pod 间亲和性/反亲和性
+	nodeVolumeLimitsEnable          bool // 节点卷数量限制
+	volumeZoneEnable                bool // 卷可用区匹配
+	podTopologySpreadEnable         bool // Pod 拓扑分散约束
+	cacheEnable                     bool // 谓词缓存
+	volumeBindingEnable             bool // 卷绑定
+	dynamicResourceAllocationEnable bool // 动态资源分配（DRA）
 }
 
 // BindContextExtension 保存 predicates 插件在绑定上下文中的扩展信息。
