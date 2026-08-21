@@ -252,7 +252,7 @@ func (pp *numaPlugin) OnSessionOpen(ssn *framework.Session) {
 
 	ssn.AddPredicateFn(pp.Name(), predicateFn)
 
-	// 【注册 BatchNodeOrder 扩展点】
+	// 注册 BatchNodeOrder 扩展点
 	// 在 score 阶段，根据 NUMA 拓扑质量对所有节点批量打分
 	// 核心思想：分配给 Task 的 CPU 跨越的 NUMA Node 越少，节点得分越高
 	batchNodeOrderFn := func(task *api.TaskInfo, nodeInfo []*api.NodeInfo) (map[string]float64, error) {
