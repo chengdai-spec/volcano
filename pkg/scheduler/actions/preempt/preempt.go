@@ -127,7 +127,7 @@ func (pmpt *Action) parseArguments(ssn *framework.Session) {
 //
 // 步骤：
 //  1. 解析配置参数；
-//  2. 遍历所有 Job，收集“饥饿”（Starving）的抢占者 Job 及其 Pending 任务；
+//  2. 遍历所有 Job，收集“饥饿”(Starving)的抢占者 Job 及其 Pending 任务；
 //  3. 按队列优先级排序，依次处理每个队列的抢占；
 //  4. 队列内 Job 间抢占：按 Job 优先级依次尝试抢占同队列中其他 Job 的资源；
 //  5. 队列内 Task 间抢占：对每个 Job 尝试抢占同 Job 内其他 Task 的资源；
@@ -136,15 +136,15 @@ func (pmpt *Action) Execute(ssn *framework.Session) {
 	klog.V(5).Infof("Enter Preempt ...")
 	defer klog.V(5).Infof("Leaving Preempt ...")
 
-	// 步骤 1：解析配置参数。
+	// 步骤 1：解析配置参数
 	pmpt.parseArguments(ssn)
 
-	// preemptorsMap: 队列 ID → 抢占者 Job 优先级队列（按 JobOrderFn 排序）。
+	// preemptorsMap: 队列 ID → 抢占者 Job 优先级队列（按 JobOrderFn 排序）
 	preemptorsMap := map[api.QueueID]*util.PriorityQueue{}
-	// preemptorTasks: Job ID → 该 Job 中待抢占的 Task 优先级队列（按 TaskOrderFn 排序）。
+	// preemptorTasks: Job ID → 该 Job 中待抢占的 Task 优先级队列（按 TaskOrderFn 排序）
 	preemptorTasks := map[api.JobID]*util.PriorityQueue{}
 
-	// underRequestByQueue: 队列 ID → 该队列下所有“饥饿”Job 列表，用于后续 Job 内 Task 间抢占。
+	// underRequestByQueue: 队列 ID → 该队列下所有“饥饿”Job 列表，用于后续 Job 内 Task 间抢占
 	underRequestByQueue := map[api.QueueID][]*api.JobInfo{}
 
 	// 步骤 2：遍历所有 Job，收集符合条件的抢占者
@@ -166,20 +166,20 @@ func (pmpt *Action) Execute(ssn *framework.Session) {
 			continue
 		}
 
-		// 只处理“饥饿”的 Job（资源需求未满足，需要更多资源）。
+		// 只处理“饥饿”的 Job（资源需求未满足，需要更多资源）
 		if !ssn.JobStarving(job) {
 			continue
 		}
 
-		// TODO: 当前包含 NetworkTopology 约束的 Job 不支持抢占。
-		// 原因：抢占可能破坏 NCCL 通信拓扑完整性，待 issue #4374 解决后移除此限制。
+		// TODO: 当前包含 NetworkTopology 约束的 Job 不支持抢占
+		// 原因：抢占可能破坏 NCCL 通信拓扑完整性，待 issue #4374 解决后移除此限制
 		if job.ContainsNetworkTopology() {
 			klog.V(3).Infof("Job <%s/%s> Queue <%s> skip preemption, reason: jobs containing networkTopology do not support preemption",
 				job.Namespace, job.Name, job.Queue)
 			continue
 		}
 
-		// 将抢占者 Job 加入对应队列的优先级队列。
+		// 将抢占者 Job 加入对应队列的优先级队列
 		if _, found := preemptorsMap[job.Queue]; !found {
 			preemptorsMap[job.Queue] = util.NewPriorityQueue(ssn.JobOrderFn)
 		}
@@ -204,8 +204,8 @@ func (pmpt *Action) Execute(ssn *framework.Session) {
 	}
 
 	ph := util.NewPredicateHelper()
-	// 步骤 4：队列内 Job 间抢占。
-	// 按队列优先级依次处理，每个队列内按 Job 优先级依次尝试抢占同队列中其他 Job 的资源。
+	// 步骤 4：队列内 Job 间抢占
+	// 按队列优先级依次处理，每个队列内按 Job 优先级依次尝试抢占同队列中其他 Job 的资源
 	for {
 		if queues.Empty() {
 			break
@@ -215,7 +215,7 @@ func (pmpt *Action) Execute(ssn *framework.Session) {
 		for {
 			preemptors := preemptorsMap[queue.UID]
 
-			// 如果队列为空或没有抢占者，跳出当前队列的处理循环。
+			// 如果队列为空或没有抢占者，跳出当前队列的处理循环
 			if preemptors == nil || preemptors.Empty() {
 				klog.V(4).Infof("No preemptors in Queue <%s>, break.", queue.Name)
 				break
@@ -223,30 +223,30 @@ func (pmpt *Action) Execute(ssn *framework.Session) {
 
 			preemptorJob := preemptors.Pop().(*api.JobInfo)
 
-			// 为当前 Job 的抢占创建临时 Statement，隔离驱逐操作。
+			// 为当前 Job 的抢占创建临时 Statement，隔离驱逐操作
 			stmt := framework.NewStatement(ssn)
 			var assigned bool
 			var err error
 			for {
-				// 如果 Job 不再“饥饿”（资源已满足），停止抢占。
+				// 如果 Job 不再“饥饿”（资源已满足），停止抢占
 				if !ssn.JobStarving(preemptorJob) {
 					break
 				}
 
-				// 如果没有待抢占的 Task，跳出当前 Job 的处理循环。
+				// 如果没有待抢占的 Task，跳出当前 Job 的处理循环
 				if preemptorTasks[preemptorJob.UID].Empty() {
 					klog.V(3).Infof("No preemptor task in job <%s/%s>.",
 						preemptorJob.Namespace, preemptorJob.Name)
 					break
 				}
 
-				// 弹出最高优先级的待抢占 Task。
+				// 弹出最高优先级的待抢占 Task
 				preemptor := preemptorTasks[preemptorJob.UID].Pop().(*api.TaskInfo)
 
 				// 执行抢占，filter 函数限定可被抢占的目标：
-				// 必须是同队列内其他 Job 的、可抢占状态的、符合 BestEffort 约束的任务。
+				// 必须是同队列内其他 Job 的、可抢占状态的、符合 BestEffort 约束的任务
 				assigned, err = pmpt.preempt(ssn, stmt, preemptor, func(task *api.TaskInfo) bool {
-					// 忽略非运行状态的任务。
+					// 忽略非运行状态的任务
 					if !api.PreemptableStatus(task.Status) {
 						return false
 					}
@@ -284,12 +284,12 @@ func (pmpt *Action) Execute(ssn *framework.Session) {
 			}
 		}
 
-		// 步骤 5：队列内 Job 内 Task 间抢占。
-		// 对当前队列下的每个 Job，尝试让高优先级 Pending Task 抢占同 Job 内低优先级运行中 Task 的资源。
+		// 步骤 5：队列内 Job 内 Task 间抢占
+		// 对当前队列下的每个 Job，尝试让高优先级 Pending Task 抢占同 Job 内低优先级运行中 Task 的资源
 		for _, job := range underRequestByQueue[queue.UID] {
-			// 使用独立的 intraJobPreemptors 优先级队列，避免覆盖 preemptorTasks map。
+			// 使用独立的 intraJobPreemptors 优先级队列，避免覆盖 preemptorTasks map
 			// preemptorTasks 在上方 Job 发现阶段填充，被队列间抢占循环消费；
-			// 如果在此处覆盖，多队列场景下会因 Go map 迭代顺序不确定性导致其他队列的抢占者丢失。
+			// 如果在此处覆盖，多队列场景下会因 Go map 迭代顺序不确定性导致其他队列的抢占者丢失
 			intraJobPreemptors := util.NewPriorityQueue(ssn.TaskOrderFn)
 			for _, task := range job.TaskStatusIndex[api.Pending] {
 				// 跳过调度门控的 Task。
@@ -305,24 +305,24 @@ func (pmpt *Action) Execute(ssn *framework.Session) {
 
 				preemptor := intraJobPreemptors.Pop().(*api.TaskInfo)
 
-				// 为每个 Task 的抢占创建独立的 Statement。
+				// 为每个 Task 的抢占创建独立的 Statement
 				stmt := framework.NewStatement(ssn)
-				// 执行抢占，filter 函数限定可被抢占的目标为同 Job 内的任务。
+				// 执行抢占，filter 函数限定可被抢占的目标为同 Job 内的任务
 				assigned, err := pmpt.preempt(ssn, stmt, preemptor, func(task *api.TaskInfo) bool {
-					// 忽略非运行状态的任务。
+					// 忽略非运行状态的任务
 					if !api.PreemptableStatus(task.Status) {
 						return false
 					}
-					// BestEffort Pod 不能抢占非 BestEffort Pod。
+					// BestEffort Pod 不能抢占非 BestEffort Pod
 					if preemptor.BestEffort && !task.BestEffort {
 						return false
 					}
-					// 跳过未标记为可抢占的任务。
+					// 跳过未标记为可抢占的任务
 					if !task.Preemptable {
 						return false
 					}
 
-					// 只能抢占同 Job 内的任务。
+					// 只能抢占同 Job 内的任务
 					return preemptor.Job == task.Job
 				}, ph)
 				if err != nil {
@@ -347,11 +347,12 @@ func (pmpt *Action) UnInitialize() {}
 // preempt 执行单个任务的抢占流程。
 //
 // 步骤：
-//  1. 检查抢占资格（preemptionPolicy 是否为 Never、nominatedNode 状态检查等）；
-//  2. 运行 PrePredicateFn（PreFilter 插件）；
-//  3. 过滤不可调度节点，然后执行谓词过滤得到可行节点列表；
-//  4. 按 Shard 分组（本 Shard 优先，其他 Shard 次之）；
-//  5. 根据配置选择 topologyAwarePreempt 或 normalPreempt 执行抢占。
+//
+//	1.检查抢占资格(preemptionPolicy 是否为 Never/nominatedNode 状态检查等)
+//	2.运行 PrePredicateFn(PreFilter 插件)
+//	3.过滤不可调度节点,然后执行谓词过滤得到可行节点列表
+//	4.按 Shard 分组(本 Shard 优先,其他 Shard 次之)
+//	5.根据配置选择 topologyAwarePreempt 或 normalPreempt 执行抢占
 func (pmpt *Action) preempt(
 	ssn *framework.Session,
 	stmt *framework.Statement,
@@ -378,17 +379,17 @@ func (pmpt *Action) preempt(
 		│   原因: Insufficient CPU                                  │
 		│   驱逐低优先级Pod? → 释放CPU → A可以调度 ✅                  │
 		├──────────────────────────────────────────────────────────┤
-		│ Node-2: Pod要求 nodeAffinity: zone=us-east               │
+		│ Node-2: Pod要求 nodeAffinity: zone=us-east                │
 		│   但 Node-2 的标签是 zone=eu-west                          │
 		│   谓词结果: UnschedulableAndUnresolvable                   │
 		│   原因: node(s) didn't match Pod's node affinity/selector │
 		│   驱逐低优先级Pod? → 标签还是不对 → A仍然无法调度 ❌            │
-		├──────────────────────────────────────────────────────────┤
-		│ Node-3: 节点有污点 gpu=true:NoSchedule                     │
-		│   Pod A 没有对应容忍                                       │
-		│   谓词结果: UnschedulableAndUnresolvable                  │
-		│   原因: node(s) had taint {gpu=true:NoSchedule}          │
-		│   驱逐低优先级Pod? → 污点还在 → A仍然无法调度 ❌              │
+		├──────────────────────────────────────────────────────────-┤
+		│ Node-3: 节点有污点 gpu=true:NoSchedule                      │
+		│   Pod A 没有对应容忍                                        │
+		│   谓词结果: UnschedulableAndUnresolvable                   │
+		│   原因: node(s) had taint {gpu=true:NoSchedule}           │
+		│   驱逐低优先级Pod? → 污点还在 → A仍然无法调度 ❌               │
 		└──────────────────────────────────────────────────────────┘
 	*/
 
@@ -547,14 +548,14 @@ func (pmpt *Action) taskEligibleToPreempt(preemptor *api.TaskInfo) error {
 			return fmt.Errorf("not eligible due to the predicate returned a non-FitError error, the error is: %v", err)
 		}
 
-		// 如果 nominatedNode 被谓词判定为 UnschedulableAndUnresolvable，
-		// 说明该节点的问题无法通过抢占解决，应重新进入抢占流程。
+		// 如果 nominatedNode 被谓词判定为 UnschedulableAndUnresolvable
+		// 说明该节点的问题无法通过抢占解决，应重新进入抢占流程
 		if fitError.Status.ContainsUnschedulableAndUnresolvable() {
 			return nil
 		}
 
-		// 检查 nominatedNode 上是否已有低优先级 Pod 因抢占而终止。
-		// 如果有，说明上一轮抢占正在生效中，应等待完成而非重复抢占。
+		// 检查 nominatedNode 上是否已有低优先级 Pod 因抢占而终止
+		// 如果有，说明上一轮抢占正在生效中，应等待完成而非重复抢占
 		preemptorPodPriority := PodPriority(preemptor.Pod)
 		for _, p := range nodeInfo.Pods() {
 			if PodPriority(p) < preemptorPodPriority && podTerminatingByPreemption(p) {
@@ -572,10 +573,10 @@ func (pmpt *Action) taskEligibleToPreempt(preemptor *api.TaskInfo) error {
 // 然后从所有成功的候选节点中选出最优的一个执行真实驱逐。
 //
 // 步骤：
-//  1. 调用 findCandidates 在所有候选节点上并行模拟驱逐，收集可行的候选节点列表；
-//  2. 调用 SelectCandidate 从候选节点中选出最优节点（基于牺牲者优先级、数量等多维度评分）；
+//  1. 调用 findCandidates 在所有候选节点上并行模拟驱逐，收集可行的候选节点列表
+//  2. 调用 SelectCandidate 从候选节点中选出最优节点(基于牺牲者优先级、数量等多维度评分)
 //  3. 使用临时 Statement 执行 prepareCandidate 真实驱逐牺牲者；
-//  4. 调用 Pipeline 将抢占者加入目标节点的管线；成功则合并到调用方 Statement，失败则回滚。
+//  4. 调用 Pipeline 将抢占者加入目标节点的管线；成功则合并到调用方 Statement，失败则回滚
 func (pmpt *Action) topologyAwarePreempt(
 	ssn *framework.Session,
 	stmt *framework.Statement,
@@ -583,8 +584,8 @@ func (pmpt *Action) topologyAwarePreempt(
 	filter func(*api.TaskInfo) bool,
 	predicateNodes []*api.NodeInfo,
 ) (bool, error) {
-	// 步骤 1：在所有候选节点上并行模拟驱逐（dry-run），收集可行的候选节点。
-	// 此阶段不会对 stmt 产生任何副作用，所有操作都在克隆的节点快照上执行。
+	// 步骤 1：在所有候选节点上并行模拟驱逐(dry-run)，收集可行的候选节点
+	// 此阶段不会对 stmt 产生任何副作用，所有操作都在克隆的节点快照上执行
 	candidates, nodeToStatusMap, err := pmpt.findCandidates(preemptor, filter, predicateNodes, stmt)
 	if err != nil && len(candidates) == 0 {
 		return false, err
@@ -643,10 +644,11 @@ func (pmpt *Action) findCandidates(
 
 	nodeToStatusMap := make(map[string]api.Status)
 
-	// 步骤 1：计算随机偏移量（用于均匀分布起始节点）和候选节点数量。
+	// 步骤 1：计算随机偏移量(用于均匀分布起始节点)和候选节点数量
+	// 模拟驱逐多个 Pod/重新计算资源/运行插件校验等
 	offset, numCandidates := pmpt.GetOffsetAndNumCandidates(len(predicateNodes))
 
-	// 步骤 2：并行模拟驱逐，收集可行候选节点。
+	// 步骤 2：并行模拟驱逐，收集可行候选节点
 	candidates, nodeStatuses, err := pmpt.DryRunPreemption(preemptor, predicateNodes, offset, numCandidates, filter, stmt)
 	for node, nodeStatus := range nodeStatuses {
 		nodeToStatusMap[node] = nodeStatus
@@ -670,7 +672,7 @@ func prepareCandidate(c *candidate, pod *v1.Pod, stmt *framework.Statement) {
 	metrics.RegisterPreemptionAttempts()
 }
 
-// podTerminatingByPreemption 判断 Pod 是否处于因抢占而导致的终止状态。
+// podTerminatingByPreemption 判断 Pod 是否处于因抢占而导致的终止状态
 // 检查条件：DeletionTimestamp 不为空 + 存在 DisruptionTarget 条件且 Reason 为 PreemptionByScheduler。
 func podTerminatingByPreemption(p *v1.Pod) bool {
 	if p.DeletionTimestamp == nil {
@@ -729,7 +731,7 @@ func (pmpt *Action) GetOffsetAndNumCandidates(numNodes int) (int, int) {
 	return rand.Intn(numNodes), pmpt.calculateNumCandidates(numNodes)
 }
 
-// DryRunPreemption 在所有候选节点上并行模拟驱逐操作（dry-run），查找可行的抢占候选节点。
+// DryRunPreemption 在所有候选节点上并行模拟驱逐操作(dry-run)，查找可行的抢占候选节点
 //
 // 该函数使用 workqueue.ParallelizeUntil 并行处理所有节点，每个节点的处理逻辑为：
 //  1. 克隆节点快照和 CycleState，避免影响真实状态；
@@ -866,7 +868,7 @@ func (cl *candidateList) get() []*candidate {
 //  4. 构建牺牲者优先级队列，按优先级从低到高逐个弹出并模拟移除；
 //  5. 每次移除后检查：队列是否可分配 + 节点空闲资源是否足够 + 模拟谓词是否通过；
 //     如果全部满足，停止移除，当前已移除的 Pod 即为“潜在牺牲者”（potentialVictims）；
-//  6. 反向遍历 potentialVictims，尝试“赦免”（reprieve）高优先级 Pod：
+//  6. 反向遍历 potentialVictims，尝试“赦免”(reprieve)高优先级 Pod：
 //     将被移除的 Pod 重新加回节点，如果抢占者仍然能调度，则不驱逐该 Pod；
 //     否则确认驱逐。这样可以最小化实际驱逐的 Pod 数量。
 func SelectVictimsOnNode(
