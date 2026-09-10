@@ -159,7 +159,9 @@ func (a *cpuAccumulator) freeCPUs() []int {
 			iSocket := a.topo.CPUDetails[iCPUs[0]].SocketID
 			jSocket := a.topo.CPUDetails[jCPUs[0]].SocketID
 
-			// 计算与已分配 CPU 在同一 Socket 上的数量（colocation score）
+			// 计算与已分配 CPU 在同一 Socket 上的数量(colocation score)
+			// socketColoScore 降序：该 Core 所在 Socket 与已分配结果 a.result 的交集越大越先
+			// → 尽量把后续 CPU 落在已经放了这个容器的 CPU 的那个 Socket，保持同 Socket 聚集；
 			iSocketColoScore := a.topo.CPUDetails.CPUsInSockets(iSocket).Intersection(a.result).Size()
 			jSocketColoScore := a.topo.CPUDetails.CPUsInSockets(jSocket).Intersection(a.result).Size()
 
@@ -218,6 +220,11 @@ func (a *cpuAccumulator) isFailed() bool {
 //	numCPUs：需要分配的 CPU 数量
 //
 // 返回：分配结果 cpuset.CPUSet，或错误
+/**
+能用大的就不拆成小的，尽量让一个容器的 CPU 聚在同一 Socket / 同一 Core 内，减少跨 NUMA、跨核访问。
+三级是"从粗到细"逐级兜底——大颗粒分配完还差一点，才降级用 Core，再用单线程补齐零头
+
+**/
 func takeByTopology(topo *topology.CPUTopology, availableCPUs cpuset.CPUSet, numCPUs int) (cpuset.CPUSet, error) {
 	acc := newCPUAccumulator(topo, availableCPUs, numCPUs)
 	if acc.isSatisfied() {

@@ -77,12 +77,24 @@ func guaranteedCPUs(container *v1.Container) int {
 
 // generateCPUTopologyHints 根据可用 CPU 和请求数量，生成 CPU 的 NUMA 拓扑提示
 //
+// 【背景：BitMask 的用法】本函数把 bitmask.BitMask 当作“一组 NUMA Node 的集合”：
+//   - mask.GetBits()  → 该组合包含的 NUMA Node ID 列表
+//   - mask.Count()    → 该组合跨越的 NUMA Node 个数（越少代表拓扑局部性越好）
+//   - mask.IsSet(id)  → NUMA Node id 是否属于该组合
+//   - IterateBitMasks → 枚举给定 NUMA Node 全集的所有“非空子集”，每个子集回调一次
+//
 // 【算法流程】
 //  1. 遍历所有可能的 NUMA Node 组合（bitmask 迭代）
-//  2. 对每个组合，检查可用 CPU 中有多少落在该 NUMA Node 组合内
-//  3. 如果数量满足请求，生成一个候选提示
-//  4. 找出满足请求的最小 NUMA Node 数量（minAffinitySize）
-//  5. 将 NUMA Node 数量等于 minAffinitySize 的提示标记为 preferred
+//  2. 第一步：用“拓扑总容量”更新满足请求所需的最小 NUMA 数 minAffinitySize
+//  3. 第二步：用“当前实际可用 CPU”过滤，只保留此刻真正放得下请求的组合，生成候选提示
+//  4. 第三步：遍历结束后，把跨越 NUMA 数 == minAffinitySize 的提示标记为 preferred
+//
+// 【易混淆点：两个不同的数据来源】
+//   - cpusInMask（第一步）基于 CPUDetails 全量拓扑，代表该 NUMA 组合“理论上”能提供的 CPU 容量；
+//   - numMatching（第二步）基于 availableCPUs，代表该组合“当前剩余可用”的 CPU 数量。
+//   二者分离，是因为 minAffinitySize 表达的是“容量意义上的最优 NUMA 跨度下界”，
+//   而可行性判断必须依据实时剩余资源；且 minAffinitySize 需扫完所有组合才能最终确定，
+//   所以 preferred 只能放到遍历之后的第三步统一补标。
 //
 // 参数：
 //
@@ -90,22 +102,25 @@ func guaranteedCPUs(container *v1.Container) int {
 //	CPUDetails：节点的 CPU 拓扑详情（每个 CPU 属于哪个 NUMA Node/Socket/Core）
 //	request：容器请求的整数 CPU 数量
 //
-// 返回：[]TopologyHint，所有可行的 NUMA 亲和方案
+// 返回：[]TopologyHint，所有可行的 NUMA 亲和方案（其中最优者 Preferred=true）
 func generateCPUTopologyHints(availableCPUs cpuset.CPUSet, CPUDetails topology.CPUDetails, request int) []policy.TopologyHint {
-	// minAffinitySize 记录满足请求的最小 NUMA Node 数量
+	// minAffinitySize 记录满足请求的最小 NUMA Node 数量。
+	// 初始化为节点的 NUMA 总数，即“最坏情况需跨越所有 NUMA”这一上界，后续只会被调小。
 	minAffinitySize := CPUDetails.NUMANodes().Size()
 	hints := []policy.TopologyHint{}
 
-	// 遍历所有可能的 NUMA Node 组合
+	// 遍历所有可能的 NUMA Node 组合（全集的每个非空子集都会触发一次回调）
 	bitmask.IterateBitMasks(CPUDetails.NUMANodes().List(), func(mask bitmask.BitMask) {
-		// 第一步：更新当前请求大小下的 minAffinitySize
-		// 检查当前 NUMA Node 组合中的 CPU 总数是否满足请求
+		// 第一步：基于“拓扑总容量”收紧 minAffinitySize
+		// cpusInMask = 该组合涵盖的 NUMA Node 在全量拓扑下的 CPU 总数（不看是否空闲）
+		// 若该组合容量足以满足请求，且跨越的 NUMA 数比当前下界更少，则把下界调小
 		cpusInMask := CPUDetails.CPUsInNUMANodes(mask.GetBits()...).Size()
 		if cpusInMask >= request && mask.Count() < minAffinitySize {
 			minAffinitySize = mask.Count()
 		}
 
-		// 第二步：检查当前 NUMA Node 组合中有多少可用 CPU
+		// 第二步：基于“当前可用 CPU”判断该组合此刻是否真正可行
+		// 统计 availableCPUs 中，其所属 NUMA 落在本组合内的 CPU 个数
 		numMatching := 0
 		for _, c := range availableCPUs.List() {
 			if mask.IsSet(CPUDetails[c].NUMANodeID) {
@@ -113,20 +128,21 @@ func generateCPUTopologyHints(availableCPUs cpuset.CPUSet, CPUDetails topology.C
 			}
 		}
 
-		// 如果可用 CPU 数量不足，跳过该组合
+		// 若该组合当前可用 CPU 数量不足以满足请求，跳过（不产生候选方案）
 		if numMatching < request {
 			return
 		}
 
-		// 生成候选提示，初始 preferred 设为 false
+		// 该组合可行，生成候选提示；preferred 先置 false，待全部遍历完再在第三步统一定级
 		hints = append(hints, policy.TopologyHint{
 			NUMANodeAffinity: mask,
 			Preferred:        false,
 		})
 	})
 
-	// 第三步：根据 minAffinitySize 标记 preferred
-	// NUMA Node 数量等于 minAffinitySize 的提示为 preferred（最优局部性）
+	// 第三步：统一标记 preferred
+	// 只有跨越 NUMA 数恰好等于最小下界 minAffinitySize 的可行方案，才是拓扑局部性最优解
+	// （之所以放到遍历之后，是因为 minAffinitySize 需扫完所有组合才能最终确定）
 	for i := range hints {
 		if hints[i].NUMANodeAffinity.Count() == minAffinitySize {
 			hints[i].Preferred = true
